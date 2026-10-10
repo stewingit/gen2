@@ -462,6 +462,87 @@ return (function(...)local ae={}ae.__index=ae type RequestFn=(...any)->any funct
 end)()
 
 end)
+N['Engine/Core/AssetManager/icons'] = Runtime.module(N['Engine/Core/AssetManager'], 'icons', function(script, require)
+local log = require(script.Parent.Parent.Utilities.log)
+
+local Icons = {}
+Icons.url = 'https://raw.githubusercontent.com/stewingit/gen2/refs/heads/main/icons.lua'
+Icons.timeout = 10
+
+local library, attempted, loading = nil, false, false
+local cache = {}
+local PREFIXES = {'rbxassetid://', 'rbxasset://', 'rbxthumb://'}
+
+function Icons.setLibrary(tbl)
+	library = if type(tbl) == 'table' then tbl else nil
+	attempted = true
+	table.clear(cache)
+end
+
+local function load()
+	if loading then
+		while loading do task.wait() end
+		return library
+	end
+	if attempted then return library end
+	attempted = true
+	local canGet, httpGet = pcall(function() return game.HttpGet end)
+	if not (loadstring and canGet and httpGet) then
+		log.warn('Stewfield | Lucide icons need loadstring and HttpGet (or Icons.setLibrary), so icon names will not show')
+		return nil
+	end
+	loading = true
+	local result, finished
+	task.spawn(function()
+		local ok, value = pcall(function() return loadstring(game:HttpGet(Icons.url))() end)
+		if ok and type(value) == 'table' then result = value end
+		finished = true
+	end)
+	local started = os.clock()
+	while not finished and os.clock() - started < Icons.timeout do task.wait() end
+	loading = false
+	if result then library = result
+	else log.warn('Stewfield | Lucide icons could not be loaded (the request failed or timed out)') end
+	return library
+end
+
+function Icons.resolve(icon)
+	if icon == nil or icon == 0 or icon == '' then return '', nil, nil end
+	if type(icon) == 'number' then return string.format('rbxassetid://%d', math.floor(icon)), nil, nil end
+	if type(icon) ~= 'string' then
+		log.warn('Stewfield | The icon must be an asset id (number) or a Lucide icon name (string)')
+		return '', nil, nil
+	end
+	for _, prefix in PREFIXES do
+		if string.sub(icon, 1, #prefix) == prefix then return icon, nil, nil end
+	end
+	local hit = cache[icon]
+	if hit then return hit[1], hit[2], hit[3] end
+	local lib = load()
+	if not lib then return '', nil, nil end
+	local name = string.match(string.lower(icon), '^%s*(.-)%s*$')
+	local sheet = lib['48px']
+	local entry = sheet and sheet[name]
+	if not (entry and type(entry[1]) == 'number' and type(entry[2]) == 'table' and type(entry[3]) == 'table') then
+		log.warn('Stewfield | Unknown Lucide icon "' .. tostring(name) .. '"')
+		cache[icon] = {'', nil, nil}
+		return '', nil, nil
+	end
+	hit = {string.format('rbxassetid://%d', math.floor(entry[1])), Vector2.new(entry[3][1], entry[3][2]), Vector2.new(entry[2][1], entry[2][2])}
+	cache[icon] = hit
+	return hit[1], hit[2], hit[3]
+end
+
+function Icons.apply(instance, icon)
+	local uri, offset, size = Icons.resolve(icon)
+	instance.Image = uri
+	instance.ImageRectOffset = offset or Vector2.zero
+	instance.ImageRectSize = size or Vector2.zero
+end
+
+return Icons
+
+end)
 N['Engine/Core/AssetManager/assetResolver'] = Runtime.module(N['Engine/Core/AssetManager'], 'assetResolver', function(script, require)
 local ab, ac = script, require
 return (function(...)local ae,af=ac(ab.Parent.network),ac(ab.Parent.Parent.Utilities.log)type AssetId=number|string type AssetDownloadUrl=string type CacheKey=AssetId type
@@ -664,6 +745,7 @@ end)()
 end)
 N['Engine/Core/Renderer'] = Runtime.module(N['Engine/Core'], 'Renderer', function(script, require)
 local locale = require(script.Parent.Utilities.locale)
+local Icons = require(script.Parent.AssetManager.icons)
 
 local Renderer = {}
 Renderer.__index = Renderer
@@ -672,7 +754,9 @@ function Renderer.new(opts)
 	local self = setmetatable({}, Renderer)
 	self.themeManager = opts.themeManager
 	self.theme = opts.themeManager.theme
-	self.assign = opts.assign or function(instance, property, value) instance[property] = value end
+	self.assign = opts.assign or function(instance, property, value)
+		if property == 'Image' then Icons.apply(instance, value) else instance[property] = value end
+	end
 	self.interactive = opts.interactive or function() return true end
 	self.instances = opts.instances or {}
 	self.connections = opts.connections or {}
