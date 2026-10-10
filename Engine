@@ -2102,7 +2102,7 @@ end
 return Heading
 
 end)
--- Stewfield Engine (generated bundle, part 2 of 2). Continues directly from part 1.
+
 N['Engine/Primitives/Caption'] = Runtime.module(N['Engine/Primitives'], 'Caption', function(script, require)
 local Styles = require(script.Parent.Parent.Core.StyleRegistry)
 local locale = require(script.Parent.Parent.Core.Utilities.locale)
