@@ -190,16 +190,14 @@ return require(script.Parent.Parent.Parent.Engine.Core.Persistence.filesystemMan
 end)
 N['gen2/Stewfield/utility/image'] = Runtime.module(N['gen2/Stewfield/utility'], 'image', function(script, require)
 local ab, ac = script, require
-return (function(...)local ae,af=ac(ab.Parent.imageCache),ac(ab.Parent.
-		variables)type AvatarCallback=ae.AvatarCallback type PreloadCallback=ae.PreloadCallback local ag={}ag.rewrites=ae.
+return (function(...)local ae,af,iconLib=ac(ab.Parent.imageCache),ac(ab.Parent.variables),ac(ab.Parent.Parent.Parent.Engine.Core.AssetManager.icons)type AvatarCallback=ae.AvatarCallback type PreloadCallback=ae.PreloadCallback local ag={}ag.rewrites=ae.
 		rewrites ag.onBlock=nil::((unknown)->())?type PendingProperties={[string]:boolean}ag.pending={}::{[number]:{[Instance]:
 			PendingProperties}}local ah,ai:{[string]:boolean}=false,{Image=true,HoverImage=true,PressedImage=true}local function aj(
 			ak:unknown):number?if type(ak)=='number'then return ak elseif type(ak)=='string'then return tonumber(string.match(ak,
 				'^rbxassetid://(%d+)$'))end return nil end local function ak(al:unknown):string if ag.onBlock then ag.onBlock(al)end
 			return''end function ag.preload(al:PreloadCallback?):(boolean,number)ah=false return ae.preload(function(am)ah=true
 				table.clear(ag.pending)if al then al(am)end end)end function ag.avatar(al:number,am:AvatarCallback?):string if not af.
-				secureMode then return`rbxthumb://type=AvatarHeadShot&id={al}&w=48&h=48`end return ae.avatar(al,am)end function ag.
-				assign(al:Instance,am:string,b:unknown)local c=al::any if not ai[am]then c[am]=b return end c[am]=ag.resolve(b)if af.
+				secureMode then return`rbxthumb://type=AvatarHeadShot&id={al}&w=48&h=48`end return ae.avatar(al,am)end function ag.assign(al:Instance,am:string,b:unknown)local c=al::any if not ai[am]then c[am]=b return end if am=='Image'then local uri,off,size=iconLib.resolve(b)c.ImageRectOffset=off or Vector2.zero c.ImageRectSize=size or Vector2.zero b=uri end c[am]=ag.resolve(b)if af.
 					secureMode and not ah then local d=aj(b)if d and not ag.rewrites[d]then local e=ag.pending[d]if not e then e=
 							setmetatable({},{__mode='k'})::any ag.pending[d]=e end local f=e[al]if not f then f={}e[al]=f end f[am]=true end end end
 		ae.onCached=function(al:number)local am=ag.pending[al]if not am then return end local b=ag.rewrites[al]if b then for c,d
