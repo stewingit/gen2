@@ -3224,13 +3224,6 @@ local H = S.hint
 
 local function asset(id) return 'rbxassetid://' .. tostring(id) end
 
-local ACTIVITY_INPUTS = {
-	[Enum.UserInputType.MouseButton1] = true,
-	[Enum.UserInputType.MouseButton2] = true,
-	[Enum.UserInputType.Touch] = true,
-	[Enum.UserInputType.MouseWheel] = true,
-}
-
 local function setHintShown(hint, shown)
 	if hint.shown == shown then return end
 	hint.shown = shown
@@ -3255,13 +3248,6 @@ local function createHint(renderer, window)
 		hint.idleSince = os.clock()
 		setHintShown(hint, false)
 	end
-
-	renderer:Connect(variables.userInputService.InputBegan, function(input)
-		if ACTIVITY_INPUTS[input.UserInputType] then markActive() end
-	end)
-	renderer:Connect(variables.userInputService.InputChanged, function(input)
-		if input.UserInputType == Enum.UserInputType.MouseWheel then markActive() end
-	end)
 
 	renderer:Connect(variables.runService.RenderStepped, function()
 		if not holder.Parent then return end
