@@ -1,0 +1,1012 @@
+local ENGINE_URL = 'https://raw.githubusercontent.com/stewingit/gen2/refs/heads/main/Engine'
+local BRAND_FONT = 'rbxassetid://12187365364'
+
+local CONFIG = {
+	Theme = 'default',
+	RootFolder = 'Script Grabber',
+	MaxFolderName = 19,
+	MaxFileName = 40,
+	ViewLimit = 15000,
+	Grabber = {Width = 360, Height = 440},
+	Viewer = {Width = 580, Height = 440},
+}
+
+local ICON = {
+	App = 'download',
+	Viewer = 'file-code',
+	Folder = 'folder',
+	File = 'file-text',
+	Edit = 'pencil',
+	NewFolder = 'folder-plus',
+	Back = 'arrow-left',
+	Copy = 'copy',
+	Search = 'search',
+	Listen = 'radio',
+	Trash = 'trash-2',
+}
+
+local registry = (getgenv and getgenv()) or shared
+
+if registry.ScriptGrabber and registry.ScriptGrabber.Destroy then
+	pcall(registry.ScriptGrabber.Destroy)
+end
+pcall(function()
+	local old = game:GetService('CoreGui'):FindFirstChild('SourceGrabber')
+	if old then old:Destroy() end
+end)
+
+do
+	local missing = {}
+	if typeof(writefile) ~= 'function' then table.insert(missing, 'writefile') end
+	if typeof(readfile) ~= 'function' then table.insert(missing, 'readfile') end
+	if typeof(isfile) ~= 'function' then table.insert(missing, 'isfile') end
+	if typeof(isfolder) ~= 'function' then table.insert(missing, 'isfolder') end
+	if typeof(makefolder) ~= 'function' then table.insert(missing, 'makefolder') end
+	if typeof(listfiles) ~= 'function' then table.insert(missing, 'listfiles') end
+	if typeof(delfile) ~= 'function' then table.insert(missing, 'delfile') end
+	if typeof(delfolder) ~= 'function' then table.insert(missing, 'delfolder') end
+	if typeof(hookfunction) ~= 'function' then table.insert(missing, 'hookfunction') end
+	assert(#missing == 0, 'Script Grabber: your executor is missing: ' .. table.concat(missing, ', '))
+end
+
+local Engine = registry.StewfieldEngine
+if not Engine then
+	local canGet, httpGet = pcall(function() return game.HttpGet end)
+	assert(loadstring and canGet and httpGet, 'Script Grabber: cannot download the Engine in this environment')
+	Engine = loadstring(game:HttpGet(ENGINE_URL))()
+end
+
+local Runtime, root = Engine.runtime, Engine.root
+local function need(node) return Runtime.require(node) end
+
+local variables = need(root.Core.StateManager.variables)
+variables.setBrandFontAsset(BRAND_FONT)
+
+local Animator = need(root.Core.Animator)
+local Styles = need(root.Core.StyleRegistry)
+local ThemeManager = need(root.Core.ThemeManager)
+local Renderer = need(root.Core.Renderer)
+local Icons = need(root.Core.AssetManager.icons)
+local layouts = need(root.Core.LayoutManager.layouts)
+
+local WindowFrame = need(root.Primitives.WindowFrame)
+local Page = need(root.Primitives.Page)
+local Panel = need(root.Primitives.Panel)
+local ButtonBase = need(root.Primitives.ButtonBase)
+local IconButton = need(root.Primitives.IconButton)
+local Field = need(root.Primitives.Field)
+local ProgressBar = need(root.Primitives.ProgressBar)
+local Dialog = need(root.Primitives.Dialog)
+local DragBar = need(root.Primitives.DragBar)
+
+pcall(Icons.resolve, ICON.Folder)
+
+local WS, PS = Styles.Window, Styles.Page
+local presets = Animator.presets
+
+local Window = {}
+Window.__index = Window
+
+local function newElement(window, parent, name, icon)
+	return {window = window, tab = {tabPage = parent}, name = name or '', icon = icon, connections = {}}
+end
+
+function Window.new(opts)
+	local layout = table.clone(layouts.top)
+	layout.chromeHeight = layout.topbarHeight
+
+	local themeManager = ThemeManager.new{theme = CONFIG.Theme, label = 'Script Grabber'}
+	local renderer = Renderer.new{themeManager = themeManager}
+	local self = setmetatable({
+		name = opts.name,
+		subheading = opts.subtitle,
+		icon = opts.icon,
+		layout = layout,
+		size = UDim2.fromOffset(opts.width, opts.height),
+		themeManager = themeManager,
+		renderer = renderer,
+		theme = themeManager.theme,
+		instances = renderer.instances,
+		connections = renderer.connections,
+		live = {},
+		popups = {},
+		hidden = true,
+		animating = false,
+		unloaded = false,
+		revealed = false,
+		onClose = opts.onClose,
+	}, Window)
+	renderer.interactive = function() return self:_interactive() end
+
+	WindowFrame.shell(renderer, self)
+	if opts.position then self.main.Position = opts.position end
+	WindowFrame.chrome(renderer, self)
+	WindowFrame.actionBar(renderer, self)
+
+	self.tab = {window = self, name = 'Page', customOrder = 0}
+	Page.build(renderer, self.tab, self.elements)
+	self.selectedTab = self.tab
+	self.elementsLayout:JumpTo(self.tab.tabPage)
+	self.page = self.tab.tabPage
+
+	self.closeAction = {window = self, name = 'Close'}
+	IconButton.build(renderer, self.closeAction, {name = 'Close', icon = Styles.Icons.close, parent = self.actionContainer, order = 1})
+	local function rest()
+		if not self:_settled() then return end
+		IconButton.fade(self.closeAction, 'rest')
+	end
+	IconButton.wire(renderer, self.closeAction, {
+		canHover = function() return self:_interactive() end,
+		onClick = function()
+			if self.onClose then task.spawn(self.onClose) end
+			rest()
+		end,
+		onLeave = rest,
+	})
+
+	self:_bindDrag()
+	self:Connect(variables.userInputService.InputBegan, function(input)
+		if input.KeyCode ~= Enum.KeyCode.Escape then return end
+		local top = self.popups[#self.popups]
+		if top and top.dismissable then top:Close() end
+	end)
+	return self
+end
+
+function Window:Connect(signal, callback) return self.renderer:Connect(signal, callback) end
+function Window:Disconnect(connection) self.renderer:Disconnect(connection) end
+function Window:_interactive() return not self.animating and not self.hidden end
+function Window:_settled() return not self.hidden and not self.animating end
+function Window:SetTitle(text) if self.title then self.title.Text = text end end
+
+function Window:_bindDrag()
+	local uis = variables.userInputService
+	local S = Styles.DragBar
+	local bar = {window = self}
+	DragBar.build(self.renderer, bar)
+	self.drag = bar
+	local dragging, offset, inset = false, Vector2.zero, Vector2.zero
+	if self.screenGui.IgnoreGuiInset then inset = variables.guiService:GetGuiInset() end
+
+	local function targets()
+		local pos = uis:GetMouseLocation() + offset + inset
+		local x, y = pos.X, pos.Y
+		local size, screen, margin = self.main.AbsoluteSize, self.screenGui.AbsoluteSize, S.screenMargin
+		local hx, hy = size.X / 2, size.Y / 2
+		x = math.clamp(x, hx + margin, math.max(hx + margin, screen.X - hx - margin))
+		y = math.clamp(y, hy + margin, math.max(hy + margin, screen.Y - hy - margin))
+		return UDim2.fromOffset(x, y), UDim2.fromOffset(x, y + (self.main.Size.Y.Offset / 2 + S.gap))
+	end
+
+	local function release()
+		if not dragging then return end
+		dragging = false
+		if not self:_interactive() then return end
+		local mainTarget, barTarget = targets()
+		DragBar.release(bar, mainTarget, barTarget)
+	end
+
+	self:Connect(bar.drag.MouseEnter, function()
+		if not dragging and not self.hidden then DragBar.hover(bar, true) end
+	end)
+	self:Connect(bar.drag.MouseLeave, function()
+		if not dragging and not self.hidden then DragBar.hover(bar, false) end
+	end)
+	self:Connect(bar.dragInteract.InputBegan, function(input, processed)
+		if processed then return end
+		local kind = input.UserInputType.Name
+		if kind ~= 'MouseButton1' and kind ~= 'Touch' then return end
+		if not self:_interactive() then return end
+		dragging = true
+		if self.screenGui.IgnoreGuiInset then inset = variables.guiService:GetGuiInset() end
+		offset = self.main.AbsolutePosition + self.main.AbsoluteSize * self.main.AnchorPoint - uis:GetMouseLocation()
+		DragBar.press(bar)
+	end)
+	self:Connect(uis.InputEnded, function(input)
+		local kind = input.UserInputType.Name
+		if kind == 'MouseButton1' or kind == 'Touch' then release() end
+	end)
+	self:Connect(uis.WindowFocusReleased, release)
+	self:Connect(variables.runService.RenderStepped, function(dt)
+		if not dragging then return end
+		if not self:_interactive() then
+			release()
+			return
+		end
+		local mainTarget, barTarget = targets()
+		DragBar.follow(bar, mainTarget, barTarget, dt)
+	end)
+end
+
+function Window:_showDragBar(shown)
+	local bar = self.drag
+	if shown then
+		local position = self.main.Position
+		bar.drag.Position = UDim2.new(position.X.Scale, position.X.Offset, position.Y.Scale, position.Y.Offset + (self.size.Y.Offset / 2 + Styles.DragBar.gap))
+		bar.drag.Visible = true
+		Animator.play(bar.dragCosmetic, presets.Expo_0_6, {BackgroundTransparency = Styles.DragBar.cosmetic.rest.transparency, Size = UDim2.fromOffset(Styles.DragBar.cosmetic.rest.width, Styles.DragBar.cosmetic.height)})
+	else
+		Animator.play(bar.dragCosmetic, presets.Quint_0_18, {BackgroundTransparency = 1, Size = Styles.DragBar.cosmetic.hidden})
+		task.delay(0.18, function()
+			if self.hidden and not self.unloaded then bar.drag.Visible = false end
+		end)
+	end
+end
+
+function Window:_reveal(instance, goals, animate)
+	if not instance then return end
+	if animate then
+		Animator.play(instance, presets.Expo_0_4, goals)
+	else
+		for property, value in goals do instance[property] = value end
+	end
+end
+
+function Window:_revealCommon(el, animate)
+	self:_reveal(el.stroke, {Transparency = self.theme.ElementStrokeTransparency}, animate)
+	self:_reveal(el.title, {TextTransparency = 0}, animate)
+	self:_reveal(el.main, {BackgroundTransparency = self.theme.ElementTransparency or 0}, animate)
+	if el.iconLabel then self:_reveal(el.iconLabel, {ImageTransparency = 0}, animate) end
+end
+
+function Window:_hideCommon(el, animate)
+	self:_reveal(el.stroke, {Transparency = 1}, animate)
+	self:_reveal(el.title, {TextTransparency = 1}, animate)
+	self:_reveal(el.main, {BackgroundTransparency = 1}, animate)
+	if el.iconLabel then self:_reveal(el.iconLabel, {ImageTransparency = 1}, animate) end
+end
+
+function Window:_fadeSurfaces(shown, info)
+	local goals = {
+		[self.windowShadow] = {Transparency = if shown then 0.6 else 1},
+		[self.windowStroke] = {Transparency = if shown then 0.95 else 1},
+		[self.bottomFade] = {BackgroundTransparency = if shown then 0 else 1},
+	}
+	for instance, props in goals do
+		if info then Animator.play(instance, info, props) else
+			for property, value in props do instance[property] = value end
+		end
+	end
+end
+
+function Window:_fadeChrome(shown, info)
+	if self.topbarIcon then Animator.play(self.topbarIcon, info, {ImageTransparency = if shown then 0 else 1}) end
+	if self.title then Animator.play(self.title, info, {TextTransparency = if shown then 0 else 1}) end
+	if self.subtitle then Animator.play(self.subtitle, info, {TextTransparency = if shown then 0.7 else 1}) end
+	Animator.play(self.closeAction.iconLabel, info, {ImageTransparency = if shown then 0.6 else 1})
+end
+
+function Window:_add(el)
+	table.insert(self.live, el)
+	if self.revealed then el:_setShown(true, true) end
+end
+
+function Window:RemoveElement(el)
+	local index = table.find(self.live, el)
+	if index then table.remove(self.live, index) end
+	for _, connection in el.connections do self.renderer:Disconnect(connection) end
+	el.connections = {}
+	if el.main then self.renderer:DestroySubtree(el.main) end
+end
+
+function Window:CreateButton(parent, opts)
+	local el = newElement(self, parent, opts.name, opts.icon)
+	local style = table.clone(Styles.Button.full)
+	if opts.size then
+		style.size = opts.size
+		style.pressedSize = opts.pressedSize or opts.size
+	end
+	for key, value in opts.style or {} do style[key] = value end
+	local callback = opts.callback
+	ButtonBase.buildFull(self.renderer, el, function()
+		task.spawn(function()
+			local ok, err = pcall(callback)
+			if not ok then warn('Script Grabber: button callback failed - ' .. tostring(err)) end
+		end)
+	end, {style = style})
+	if opts.order then el.main.LayoutOrder = opts.order end
+	function el._setShown(e, shown, animate)
+		if shown then self:_revealCommon(e, animate) else self:_hideCommon(e, animate) end
+	end
+	self:_add(el)
+	return el
+end
+
+function Window:CreateRow(parent, opts)
+	local renderer = self.renderer
+	local frame = renderer:Create('Frame', {Name = 'Row', Size = UDim2.new(1, -20, 0, 43), BackgroundTransparency = 1, BorderSizePixel = 0, LayoutOrder = opts.order, Parent = parent})
+	renderer:Create('UIListLayout', {FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 6), Parent = frame})
+	local row = {frame = frame}
+	row.main = self:CreateButton(frame, {
+		name = opts.name, icon = opts.icon, callback = opts.onOpen, order = 1,
+		size = UDim2.new(1, -46, 0, 43), pressedSize = UDim2.new(1, -52, 0, 43),
+		style = {textSize = 14},
+	})
+	row.edit = self:CreateButton(frame, {
+		name = '', icon = opts.editIcon, callback = opts.onEdit, order = 2,
+		size = UDim2.fromOffset(40, 43), pressedSize = UDim2.fromOffset(34, 43),
+		style = {containerSize = UDim2.fromOffset(16, 16), containerPosition = UDim2.new(0, 12, 0.5, 0), gap = 0, titleSize = UDim2.fromOffset(0, 16)},
+	})
+	return row
+end
+
+function Window:RemoveRow(row)
+	self:RemoveElement(row.main)
+	self:RemoveElement(row.edit)
+	self.renderer:DestroySubtree(row.frame)
+end
+
+function Window:CreateInput(parent, opts)
+	local renderer = self.renderer
+	local el = newElement(self, parent, opts.name, opts.icon)
+	el.placeholder = opts.placeholder or ''
+	Panel.card(renderer, el, Styles.Field.card)
+	Field.build(renderer, el, {parent = el.main, glow = function(...) return renderer:CreateGlow(...) end})
+	Field.buildTextBox(renderer, el, {text = '', placeholder = el.placeholder, clearOnFocus = false})
+	el.box.Size = UDim2.new(1, -130, 0, 30)
+	el.input.TextXAlignment = Enum.TextXAlignment.Left
+	el.input.Size = UDim2.new(1, -24, 0, 15)
+	renderer:ConnectFor(el, el.input.Focused, function()
+		Animator.play(el.input, Styles.Field.tween.focus, {TextTransparency = Styles.Field.text.focused})
+	end)
+	renderer:ConnectFor(el, el.input.FocusLost, function()
+		Animator.play(el.input, Styles.Field.tween.focus, {TextTransparency = Styles.Field.text.idle})
+	end)
+	renderer:ConnectFor(el, el.input:GetPropertyChangedSignal('Text'), function()
+		if opts.onChanged then opts.onChanged(el.input.Text) end
+	end)
+	Panel.wireHover(renderer, el)
+	if opts.order then el.main.LayoutOrder = opts.order end
+	function el._setShown(e, shown, animate)
+		if shown then self:_revealCommon(e, animate) else self:_hideCommon(e, animate) end
+		Field.setShown(function(instance, goals, a) self:_reveal(instance, goals, a) end, renderer, e, shown, animate)
+	end
+	self:_add(el)
+	return el
+end
+
+function Window:CreateProgress(parent, opts)
+	local renderer = self.renderer
+	local el = newElement(self, parent, opts.name, opts.icon)
+	el.min, el.max, el.value, el.showValue, el.indeterminate = 0, 1, 0, false, false
+	function el._ratio(e) return e.value end
+	function el._readout(e) return string.format('%d%%', math.round(e.value * 100)) end
+	function el.Set(e, value)
+		e.value = math.clamp(value, 0, 1)
+		ProgressBar.render(e)
+	end
+	ProgressBar.build(renderer, el, function(...) return renderer:CreateGlow(...) end)
+	if opts.order then el.main.LayoutOrder = opts.order end
+	function el._setShown(e, shown, animate)
+		e._shown = shown
+		if shown then self:_revealCommon(e, animate) else self:_hideCommon(e, animate) end
+		self:_reveal(e.readout, {TextTransparency = if shown then Styles.Progress.readout.shownTransparency else 1}, animate)
+		self:_reveal(e.track, {BackgroundTransparency = if shown then 0 else 1}, animate)
+		self:_reveal(e.fill, {BackgroundTransparency = if shown then 0 else 1}, animate)
+		self:_reveal(e.fillGlow, {Transparency = if shown then self.theme.AccentGlow else 1}, animate)
+	end
+	self:_add(el)
+	return el
+end
+
+function Window:Popup(opts)
+	if self.unloaded then return end
+	local renderer, window = self.renderer, self
+	local popup = {
+		window = self,
+		title = opts.title or 'Popup',
+		subtitle = opts.subtitle,
+		content = opts.content,
+		icon = opts.icon,
+		options = if opts.options and #opts.options > 0 then opts.options else {{text = 'Okay'}},
+		dismissable = opts.dismissable ~= false,
+		_reveal = {},
+		_connections = {},
+		_closed = false,
+	}
+
+	function popup:_activate(callback)
+		if self._closed then return end
+		local text = if self.input then self.input.Text else nil
+		self:Close()
+		if callback then
+			task.spawn(function()
+				local ok, err = pcall(callback, text)
+				if not ok then warn('Script Grabber: popup callback failed - ' .. tostring(err)) end
+			end)
+		end
+	end
+
+	function popup:Close()
+		if self._closed then return end
+		self._closed = true
+		local index = table.find(window.popups, self)
+		if index then table.remove(window.popups, index) end
+		for _, connection in self._connections do window:Disconnect(connection) end
+		self._connections = {}
+		Dialog.hide(renderer, self)
+	end
+
+	Dialog.build(renderer, popup)
+
+	if opts.input then
+		local D = Styles.Dialog
+		local height = 38
+		local holder = renderer:Create('Frame', {Name = 'Input', Size = UDim2.new(1, 0, 0, height), BackgroundTransparency = 1, BorderSizePixel = 0, LayoutOrder = 2, Parent = popup.card})
+		local box = {}
+		Field.build(renderer, box, {parent = holder, glow = function(...) return renderer:CreateGlow(...) end})
+		box.box.AnchorPoint = Vector2.new(0.5, 0.5)
+		box.box.Position = UDim2.fromScale(0.5, 0.5)
+		box.box.Size = UDim2.new(1, 0, 1, 0)
+		Field.buildTextBox(renderer, box, {text = opts.input.text or '', placeholder = opts.input.placeholder or '', clearOnFocus = false})
+		box.input.Size = UDim2.new(1, -24, 0, 18)
+		box.input.TextSize = 16
+		popup.input = box.input
+		Dialog.fade(popup, box.box, 'BackgroundTransparency', self.theme.FieldTransparency)
+		Dialog.fade(popup, box.boxStroke, 'Transparency', Styles.Field.box.strokeTransparency)
+		Dialog.fade(popup, box.input, 'TextTransparency', 0.1)
+		popup.card.Size = UDim2.fromOffset(D.width, popup.card.Size.Y.Offset + height + D.gap)
+
+		local limit = opts.input.limit
+		if limit then
+			table.insert(popup._connections, renderer:Connect(box.input:GetPropertyChangedSignal('Text'), function()
+				if #box.input.Text > limit then box.input.Text = box.input.Text:sub(1, limit) end
+			end))
+		end
+
+		table.insert(popup._connections, renderer:Connect(box.input.FocusLost, function(enterPressed)
+			if not enterPressed then return end
+			for _, option in popup.options do
+				if type(option) == 'table' and (option.style or option.Style) == 'primary' then
+					popup:_activate(option.callback or option.Callback)
+					return
+				end
+			end
+		end))
+	end
+
+	if popup.dismissable then
+		table.insert(popup._connections, renderer:Connect(popup.backdrop.InputBegan, function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				popup:Close()
+			end
+		end))
+	end
+
+	table.insert(self.popups, popup)
+	task.spawn(function()
+		Dialog.show(popup)
+		if popup.input and not popup._closed then
+			task.wait(0.25)
+			if not popup._closed and popup.input.Parent then popup.input:CaptureFocus() end
+		end
+	end)
+	return popup
+end
+
+function Window:Show()
+	if self.unloaded or not self.hidden or self.animating then return end
+	self.animating = true
+	self.hidden = false
+	self.main.Visible = true
+	task.spawn(function()
+		Animator.play(self.main, presets.ExpoInOut_1, {BackgroundTransparency = 0, Size = self.size})
+		task.wait(0.7)
+		if self.unloaded then return end
+		self:_fadeSurfaces(true, presets.Expo_0_6)
+		self:_fadeChrome(true, presets.Expo_0_4)
+		self:_showDragBar(true)
+		task.wait(0.15)
+		if self.unloaded then return end
+		self.revealed = true
+		for _, el in self.live do
+			el:_setShown(true, true)
+			task.wait(0.03)
+		end
+		self.animating = false
+	end)
+end
+
+function Window:Hide()
+	if self.unloaded or self.hidden or self.animating then return end
+	self.animating = true
+	self.hidden = true
+	self.revealed = false
+	local quick = presets.Quint_0_18
+	self:_fadeSurfaces(false, quick)
+	self:_fadeChrome(false, quick)
+	self:_showDragBar(false)
+	for _, el in self.live do el:_setShown(false, true) end
+	local tween = Animator.play(self.main, presets.ExpoInOut_0_35, {
+		Size = UDim2.fromOffset(self.size.X.Offset - WS.widthTrim, 0),
+		BackgroundTransparency = 1,
+	})
+	tween.Completed:Connect(function()
+		if self.unloaded then return end
+		self.main.Visible = false
+		self.animating = false
+	end)
+end
+
+function Window:Unload()
+	if self.unloaded then return end
+	self.unloaded = true
+	for index = #self.connections, 1, -1 do pcall(function() self.connections[index]:Disconnect() end) end
+	for index = #self.instances, 1, -1 do pcall(function() self.instances[index]:Destroy() end) end
+	table.clear(self.connections)
+	table.clear(self.instances)
+	table.clear(self.themeManager.bindings)
+	table.clear(self.renderer.localeProperties)
+	table.clear(self.live)
+	table.clear(self.popups)
+end
+
+local ROOT = CONFIG.RootFolder
+local app = {destroyed = false}
+local projectName = ''
+local global_index = 0
+local activeTasks = 0
+local is_initialized = false
+
+local currentRawContent, currentFullContent, currentFilePath = '', '', ''
+
+local mainW, viewerW
+local view = 'menu'
+local staticEls, rowObjs = {}, {}
+local searchEl, progress, backBtn
+local viewerCode
+
+if not isfolder(ROOT) then makefolder(ROOT) end
+
+local function basename(path) return tostring(path):match('[^/\\]+$') or tostring(path) end
+local function trim(text) return (text:match('^%s*(.-)%s*$')) end
+local function cleanFolderName(text) return trim((text:gsub('[^%w%s]', ''))) end
+local function cleanFileName(text) return trim((text:gsub('[^%w%s_]', ''))) end
+
+local function getStartingIndex(path)
+	local highest = 0
+	local ok, files = pcall(listfiles, path)
+	if ok then
+		for _, file in files do
+			local num = tonumber(basename(file):match('^(%d+)_'))
+			if num and num > highest then highest = num end
+		end
+	end
+	return highest
+end
+
+local function nextFolderName()
+	local index = 1
+	while isfolder(ROOT .. '/folder_' .. index) do index += 1 end
+	return 'folder_' .. index
+end
+
+local showMenu, showFolder, refreshFolders, refreshFiles
+
+local function refreshCurrent()
+	if view == 'menu' then refreshFolders(if searchEl then searchEl.input.Text else '') else refreshFiles() end
+end
+
+local function clearRows()
+	for _, row in rowObjs do mainW:RemoveRow(row) end
+	table.clear(rowObjs)
+end
+
+local function clearStatic()
+	for _, el in staticEls do mainW:RemoveElement(el) end
+	table.clear(staticEls)
+	searchEl, progress, backBtn = nil, nil, nil
+end
+
+local function notice(title, content)
+	mainW:Popup{title = title, content = content, icon = ICON.Trash, options = {{text = 'Okay'}}}
+end
+
+local function openProject(name)
+	projectName = ROOT .. '/' .. name
+	pcall(makefolder, projectName)
+	global_index = getStartingIndex(projectName)
+	is_initialized = true
+	showFolder()
+end
+
+local function openCreatePopup()
+	mainW:Popup{
+		title = 'New Project',
+		subtitle = 'Leave blank for an automatic name',
+		icon = ICON.NewFolder,
+		input = {placeholder = 'Name...', limit = CONFIG.MaxFolderName},
+		options = {
+			{text = 'Cancel'},
+			{text = 'Confirm', style = 'primary', callback = function(text)
+				local name = cleanFolderName(text or '')
+				if name == '' then name = nextFolderName() end
+				openProject(name)
+			end},
+		},
+	}
+end
+
+local function openDelete(kind, targetName)
+	mainW:Popup{
+		title = 'Delete ' .. string.lower(kind) .. '?',
+		content = targetName .. ' will be permanently deleted.',
+		icon = ICON.Trash,
+		options = {
+			{text = 'Cancel'},
+			{text = 'Delete', style = 'danger', callback = function()
+				pcall(function()
+					if kind == 'Folder' then delfolder(ROOT .. '/' .. targetName)
+					else delfile(projectName .. '/' .. targetName) end
+				end)
+				currentFilePath = ''
+				refreshCurrent()
+			end},
+		},
+	}
+end
+
+local function renameTarget(kind, targetName, text)
+	if kind == 'Folder' then
+		local newName = cleanFolderName(text)
+		if newName == '' or newName == targetName then return end
+		local oldPath, newPath = ROOT .. '/' .. targetName, ROOT .. '/' .. newName
+		if isfolder(newPath) then
+			notice('Name already used', 'A folder called ' .. newName .. ' already exists.')
+			return
+		end
+		pcall(function()
+			makefolder(newPath)
+			for _, file in listfiles(oldPath) do
+				writefile(newPath .. '/' .. basename(file), readfile(file))
+			end
+			delfolder(oldPath)
+		end)
+	else
+		local newName = cleanFileName(text)
+		local current = (targetName:gsub('%.txt$', ''))
+		if newName == '' or newName == current then return end
+		pcall(function()
+			writefile(projectName .. '/' .. newName .. '.txt', readfile(projectName .. '/' .. targetName))
+			delfile(projectName .. '/' .. targetName)
+		end)
+	end
+	currentFilePath = ''
+	refreshCurrent()
+end
+
+local function openEdit(kind, targetName)
+	local isFolder = kind == 'Folder'
+	local shown = if isFolder then targetName else (targetName:gsub('%.txt$', ''))
+	mainW:Popup{
+		title = 'Rename ' .. string.lower(kind),
+		icon = ICON.Edit,
+		input = {text = shown, placeholder = 'Name...', limit = if isFolder then CONFIG.MaxFolderName else CONFIG.MaxFileName},
+		options = {
+			{text = 'Cancel'},
+			{text = 'Delete', style = 'danger', callback = function() openDelete(kind, targetName) end},
+			{text = 'Rename', style = 'primary', callback = function(text) renameTarget(kind, targetName, text or '') end},
+		},
+	}
+end
+
+local function highlight(source)
+	source = source:gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;')
+	source = source:gsub('%-%-[^\n]*', '<font color="rgb(90, 100, 115)">%0</font>')
+	return source
+end
+
+local function loadFileContent(filePath)
+	if not viewerCode then return end
+	if not isfile(filePath) then
+		viewerCode.setText('ERROR: FILE NOT FOUND', '1', false)
+		return
+	end
+	if currentFilePath ~= filePath then
+		local ok, content = pcall(readfile, filePath)
+		if not ok or content == '' then content = '-- No content or read error --' end
+		currentFullContent = content
+		if #content > CONFIG.ViewLimit then
+			local folderPart = filePath:match(ROOT .. '/([^/]+)') or 'UnknownFolder'
+			local filePart = filePath:match('([^/]+)$') or 'UnknownFile'
+			content = content:sub(1, CONFIG.ViewLimit)
+				.. '\n\n-- Text limit reached\n-- View the full script in your workspace files:\n-- '
+				.. ROOT .. '/' .. folderPart .. '/' .. filePart
+		end
+		currentRawContent = content
+		currentFilePath = filePath
+	end
+
+	local lineCount = select(2, currentRawContent:gsub('\n', '')) + 1
+	local numbers = table.create(lineCount)
+	for index = 1, lineCount do numbers[index] = tostring(index) end
+
+	local rich = highlight(currentRawContent)
+	if #rich > 16000 then
+		viewerCode.setText(currentRawContent, table.concat(numbers, '\n'), false)
+	else
+		viewerCode.setText(rich, table.concat(numbers, '\n'), true)
+	end
+end
+
+local function buildViewer()
+	local cfg = CONFIG.Viewer
+	local win = Window.new{
+		name = 'File Viewer',
+		subtitle = 'Captured script',
+		icon = ICON.Viewer,
+		width = cfg.Width,
+		height = cfg.Height,
+		onClose = function() if viewerW then viewerW:Hide() end end,
+	}
+	local renderer = win.renderer
+	local page = win.page
+
+	local copyBtn
+	copyBtn = win:CreateButton(page, {
+		name = 'Copy All', icon = ICON.Copy, order = 1,
+		callback = function()
+			if setclipboard and currentFullContent ~= '' then
+				setclipboard(currentFullContent)
+				local old = copyBtn.title.Text
+				copyBtn.title.Text = 'Copied!'
+				task.wait(1.5)
+				if not win.unloaded then copyBtn.title.Text = old end
+			end
+		end,
+	})
+
+	local cardHeight = (cfg.Height - win.layout.chromeHeight) - PS.padTop - PS.padBottom - 43 - PS.gap
+	local card = {window = win, connections = {}}
+	card.main = renderer:Create('Frame', {Name = 'Code', Size = UDim2.new(1, -20, 0, cardHeight), BackgroundTransparency = 1, BorderSizePixel = 0, ClipsDescendants = true, LayoutOrder = 2, Parent = page}, {BackgroundColor3 = 'StatBackground'})
+	renderer:Create('UICorner', {Parent = card.main}, {CornerRadius = 'ElementCornerRadius'})
+	card.stroke = renderer:Create('UIStroke', {ApplyStrokeMode = Enum.ApplyStrokeMode.Border, Transparency = 1, Parent = card.main}, {Color = 'SurfaceStroke'})
+	local scroll = renderer:Create('ScrollingFrame', {
+		Size = UDim2.new(1, -12, 1, -12), Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundTransparency = 1, BorderSizePixel = 0, AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		CanvasSize = UDim2.new(0, 0, 0, 0), ScrollBarThickness = 4, ScrollBarImageTransparency = 0.7,
+		ScrollingDirection = Enum.ScrollingDirection.Y, Parent = card.main,
+	})
+	local inner = renderer:Create('Frame', {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, BorderSizePixel = 0, Parent = scroll})
+	renderer:Create('UIListLayout', {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 12), SortOrder = Enum.SortOrder.LayoutOrder, Parent = inner})
+
+	local codeFont, codeSize, lineHeight = Styles.Console.line.font, Styles.Console.line.textSize, Styles.Console.line.lineHeight
+	local numbers = renderer:Create('TextLabel', {
+		Size = UDim2.new(0, 36, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, BorderSizePixel = 0,
+		FontFace = codeFont, TextSize = codeSize, LineHeight = lineHeight, Text = '1', LayoutOrder = 1,
+		TextXAlignment = Enum.TextXAlignment.Right, TextYAlignment = Enum.TextYAlignment.Top, TextTransparency = 1, Parent = inner,
+	}, {TextColor3 = 'ContentColor'})
+	local code = renderer:Create('TextLabel', {
+		Size = UDim2.new(1, -48, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, BorderSizePixel = 0,
+		FontFace = codeFont, TextSize = codeSize, LineHeight = lineHeight, Text = '', LayoutOrder = 2, RichText = true,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true, TextTransparency = 1, Parent = inner,
+	}, {TextColor3 = 'ContentColor'})
+
+	function card._setShown(_, shown, animate)
+		win:_reveal(card.main, {BackgroundTransparency = if shown then 0 else 1}, animate)
+		win:_reveal(card.stroke, {Transparency = if shown then 0.9 else 1}, animate)
+		win:_reveal(numbers, {TextTransparency = if shown then 0.55 else 1}, animate)
+		win:_reveal(code, {TextTransparency = if shown then 0.1 else 1}, animate)
+	end
+	win:_add(card)
+
+	viewerCode = {
+		setText = function(text, lineText, rich)
+			code.RichText = rich
+			code.Text = text
+			numbers.Text = lineText
+			scroll.CanvasPosition = Vector2.zero
+		end,
+	}
+	return win
+end
+
+local function openViewer(filePath, fileName)
+	if not viewerW or viewerW.unloaded then viewerW = buildViewer() end
+	viewerW:SetTitle('VIEWING: ' .. fileName)
+	loadFileContent(filePath)
+	viewerW:Show()
+end
+
+local function setBackVisible(visible)
+	if view == 'folder' and backBtn and backBtn.main then backBtn.main.Visible = visible end
+end
+
+local function setStatus(text, color)
+	if mainW.unloaded or view ~= 'folder' or not progress then return end
+	progress.title.Text = text
+	progress.title.TextColor3 = color or mainW.theme.ContentColor
+end
+
+local function setBar(ratio)
+	if mainW.unloaded or view ~= 'folder' or not progress then return end
+	progress:Set(ratio)
+end
+
+function refreshFolders(filter)
+	if view ~= 'menu' then return end
+	clearRows()
+	local ok, folders = pcall(listfiles, ROOT)
+	if not ok then return end
+	table.sort(folders, function(a, b) return basename(a):lower() < basename(b):lower() end)
+
+	local needle = string.lower(filter or '')
+	for index, path in folders do
+		local name = basename(path)
+		if isfolder(path) and (needle == '' or string.find(name:lower(), needle, 1, true)) then
+			local count = 0
+			pcall(function() count = #listfiles(path) end)
+			table.insert(rowObjs, mainW:CreateRow(mainW.page, {
+				name = name .. ' (' .. count .. ')',
+				icon = ICON.Folder,
+				editIcon = ICON.Edit,
+				order = 100 + index,
+				onOpen = function() openProject(name) end,
+				onEdit = function() openEdit('Folder', name) end,
+			}))
+		end
+	end
+end
+
+function refreshFiles()
+	if view ~= 'folder' then return end
+	clearRows()
+	local ok, files = pcall(listfiles, projectName)
+	if not ok then return end
+	table.sort(files, function(a, b)
+		local aNum = tonumber(basename(a):match('^(%d+)_')) or 0
+		local bNum = tonumber(basename(b):match('^(%d+)_')) or 0
+		return aNum < bNum
+	end)
+	for index, file in files do
+		local fileName = basename(file)
+		table.insert(rowObjs, mainW:CreateRow(mainW.page, {
+			name = fileName,
+			icon = ICON.File,
+			editIcon = ICON.Edit,
+			order = 100 + index,
+			onOpen = function() openViewer(projectName .. '/' .. fileName, fileName) end,
+			onEdit = function() openEdit('File', fileName) end,
+		}))
+	end
+end
+
+function showMenu()
+	view = 'menu'
+	clearRows()
+	clearStatic()
+	searchEl = mainW:CreateInput(mainW.page, {
+		name = 'Search', icon = Styles.Icons.search, placeholder = 'Folders...', order = 1,
+		onChanged = function(text) refreshFolders(text) end,
+	})
+	local createBtn = mainW:CreateButton(mainW.page, {
+		name = 'Create New Folder', icon = ICON.NewFolder, order = 2, callback = openCreatePopup,
+	})
+	staticEls = {searchEl, createBtn}
+	refreshFolders('')
+end
+
+function showFolder()
+	view = 'folder'
+	clearRows()
+	clearStatic()
+	progress = mainW:CreateProgress(mainW.page, {name = 'LISTENING: ' .. basename(projectName), icon = ICON.Listen, order = 1})
+	backBtn = mainW:CreateButton(mainW.page, {
+		name = 'Back To Menu', icon = ICON.Back, order = 2,
+		callback = function()
+			is_initialized, projectName, global_index = false, '', 0
+			showMenu()
+		end,
+	})
+	backBtn.main.Visible = activeTasks == 0
+	staticEls = {progress, backBtn}
+	refreshFiles()
+end
+
+local function AutoCapture(code, chunk)
+	if app.destroyed or mainW.unloaded then return end
+	if not is_initialized then
+		local folderName = nextFolderName()
+		projectName = ROOT .. '/' .. folderName
+		pcall(makefolder, projectName)
+		global_index = 0
+		is_initialized = true
+		showFolder()
+	end
+
+	activeTasks += 1
+	global_index += 1
+	setBackVisible(false)
+
+	local rawName = (chunk and tostring(chunk):gsub('[^%w%s]', ''):sub(1, 20)) or 'script'
+	if rawName == '' then rawName = 'script' end
+	local finalFileName = global_index .. '_' .. rawName .. '.txt'
+	local targetPath = projectName
+
+	if view == 'folder' and progress then
+		local gradient = progress.fill and progress.fill:FindFirstChildOfClass('UIGradient')
+		if gradient then gradient.Color = ColorSequence.new(Color3.fromHSV(math.random(), 0.7, 1)) end
+	end
+
+	task.spawn(function()
+		local texts = {'EXTRACTING', 'GRABBING', 'DUMPING', 'CACHING', 'SNAGGING', 'VIEWING', 'YOINKING'}
+		local selectedText = texts[math.random(1, #texts)]
+
+		for i = 1, 4 do
+			if activeTasks > 0 then
+				setStatus(selectedText .. ' (' .. rawName .. ')...', Color3.fromRGB(200, 200, 255))
+				setBar(i / 4)
+				task.wait(0.4)
+			end
+		end
+
+		pcall(writefile, targetPath .. '/' .. finalFileName, code)
+		activeTasks -= 1
+
+		if activeTasks == 0 then
+			task.wait(0.8)
+			if activeTasks == 0 and not mainW.unloaded then
+				setStatus('Finished!', Color3.fromRGB(0, 255, 150))
+				setBackVisible(true)
+				if view == 'folder' and projectName == targetPath then refreshFiles() end
+				setBar(0)
+				task.wait(1.5)
+				if activeTasks == 0 then setStatus('LISTENING: ' .. basename(projectName)) end
+			end
+		end
+	end)
+end
+
+local hookState = registry.ScriptGrabberHook
+
+local function destroyAll()
+	if app.destroyed then return end
+	app.destroyed = true
+	if hookState then hookState.capture = nil end
+	if viewerW then viewerW:Unload() end
+	if mainW then mainW:Unload() end
+	registry.ScriptGrabber = nil
+end
+
+local function confirmDestroy()
+	mainW:Popup{
+		title = 'Destroy Script Grabber?',
+		content = 'This closes the grabber and stops capturing scripts. Everything already saved stays in your workspace folder.',
+		icon = ICON.Trash,
+		options = {
+			{text = 'Cancel'},
+			{text = 'Destroy', style = 'danger', callback = destroyAll},
+		},
+	}
+end
+
+local started, startErr = xpcall(function()
+	mainW = Window.new{
+		name = 'Script Grabber',
+		subtitle = 'loadstring capture',
+		icon = ICON.App,
+		width = CONFIG.Grabber.Width,
+		height = CONFIG.Grabber.Height,
+		onClose = confirmDestroy,
+	}
+	registry.ScriptGrabber = {Destroy = destroyAll}
+	showMenu()
+	mainW:Show()
+end, debug.traceback)
+
+if not started then
+	pcall(destroyAll)
+	error('Script Grabber failed to start:\n' .. tostring(startErr), 0)
+end
+
+if not hookState then
+	hookState = {}
+	registry.ScriptGrabberHook = hookState
+	local old
+	old = hookfunction(loadstring, function(code, chunk)
+		local capture = hookState.capture
+		if capture and type(code) == 'string' then task.spawn(capture, code, chunk) end
+		return old(code, chunk)
+	end)
+end
+hookState.capture = AutoCapture
