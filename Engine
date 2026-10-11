@@ -3215,14 +3215,100 @@ end)
 N['Engine/Primitives/Page'] = Runtime.module(N['Engine/Primitives'], 'Page', function(script, require)
 local Styles = require(script.Parent.Parent.Core.StyleRegistry)
 local Animator = require(script.Parent.Parent.Core.Animator)
+local variables = require(script.Parent.Parent.Core.StateManager.variables)
+local Icon = require(script.Parent.Icon)
 
 local Page = {}
 local S = Styles.Page
+local H = S.hint
+
+local function asset(id) return 'rbxassetid://' .. tostring(id) end
+
+local ACTIVITY_INPUTS = {
+	[Enum.UserInputType.MouseButton1] = true,
+	[Enum.UserInputType.MouseButton2] = true,
+	[Enum.UserInputType.Touch] = true,
+	[Enum.UserInputType.MouseWheel] = true,
+}
+
+local function setHintShown(hint, shown)
+	if hint.shown == shown then return end
+	hint.shown = shown
+	if hint.bob then hint.bob:Cancel() hint.bob = nil end
+	Animator.play(hint.icon, if shown then H.tween.fadeIn else H.tween.fadeOut, {ImageTransparency = if shown then H.transparency else 1})
+	if shown then
+		hint.icon.Position = UDim2.new(0.5, 0, 0.5, -H.bob)
+		hint.bob = Animator.play(hint.icon, H.tween.bob, {Position = UDim2.new(0.5, 0, 0.5, H.bob)})
+	else
+		Animator.play(hint.icon, H.tween.settle, {Position = UDim2.fromScale(0.5, 0.5)})
+	end
+end
+
+-- One hint per window; it follows whichever tab is currently selected.
+local function createHint(renderer, window)
+	local parent = window.bottomFade or window.main
+	local holder = renderer:Create('Frame', {Name = 'ScrollHint', AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -H.bottomOffset), Size = H.size, BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = H.zIndex, Parent = parent})
+	local icon = Icon.create(renderer, {image = asset(Styles.Icons.chevron), size = UDim2.fromScale(1, 1), anchor = Vector2.new(0.5, 0.5), position = UDim2.fromScale(0.5, 0.5), rotation = H.rotation, zIndex = H.zIndex, parent = holder})
+	local hint = {holder = holder, icon = icon, shown = false, tab = nil, lastY = 0, idleSince = os.clock()}
+
+	local function markActive()
+		hint.idleSince = os.clock()
+		setHintShown(hint, false)
+	end
+
+	renderer:Connect(variables.userInputService.InputBegan, function(input)
+		if ACTIVITY_INPUTS[input.UserInputType] then markActive() end
+	end)
+	renderer:Connect(variables.userInputService.InputChanged, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseWheel then markActive() end
+	end)
+
+	renderer:Connect(variables.runService.RenderStepped, function()
+		if not holder.Parent then return end
+		local now = os.clock()
+		local tab = window.selectedTab
+		local page = tab and tab.tabPage
+		local interactive = if window._interactive then window:_interactive() else true
+		if not page or not page.Parent or window.unloaded or window.hidden or window.minimised or window._searching or not interactive then
+			hint.tab = nil
+			hint.idleSince = now
+			setHintShown(hint, false)
+			return
+		end
+		local y = page.CanvasPosition.Y
+		if hint.tab ~= tab then
+			-- switching tabs counts as activity
+			hint.tab = tab
+			hint.lastY = y
+			markActive()
+			return
+		end
+		if math.abs(y - hint.lastY) > 0.5 then
+			-- the user (or a dropdown) scrolled this tab: don't nag about it again
+			hint.lastY = y
+			tab._scrollHintDismissed = true
+			markActive()
+			return
+		end
+		local remaining = page.AbsoluteCanvasSize.Y - (y + page.AbsoluteWindowSize.Y)
+		local overflows = page.AbsoluteWindowSize.Y > 0 and page.AbsoluteCanvasSize.Y - page.AbsoluteWindowSize.Y > H.minOverflow
+		local wanted = overflows and remaining > H.minOverflow and not tab._scrollHintDismissed and (now - hint.idleSince) >= H.delay
+		setHintShown(hint, wanted)
+	end)
+	return hint
+end
+
+function Page.attachScrollHint(renderer, tab)
+	local window = tab.window
+	if not window or window._scrollHint then return end
+	window._scrollHint = createHint(renderer, window)
+end
 
 function Page.build(renderer, tab, parent)
 	tab.tabPage = renderer:Create('ScrollingFrame', {Name = tab.name, Size = S.size, Position = S.position, AnchorPoint = S.anchor, BorderSizePixel = 0, BackgroundTransparency = 1, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(0, 0, 0, 0), ScrollBarThickness = 0, ScrollingDirection = Enum.ScrollingDirection.Y, LayoutOrder = tab.customOrder or 0, Parent = parent})
 	tab.tabPageLayout = renderer:Create('UIListLayout', {Padding = UDim.new(0, S.gap), FillDirection = Enum.FillDirection.Vertical, VerticalAlignment = Enum.VerticalAlignment.Top, HorizontalAlignment = Enum.HorizontalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder, Parent = tab.tabPage})
 	renderer:Create('UIPadding', {PaddingTop = UDim.new(0, S.padTop), PaddingBottom = UDim.new(0, S.padBottom), Parent = tab.tabPage})
+	Page.attachScrollHint(renderer, tab)
 end
 
 function Page.spinGradients(tab)
@@ -4542,6 +4628,22 @@ return {
 	spin = {from = -270, to = 90, tween = P.Quint_0_7},
 	settingsIcon = {transparency = 0.6, tween = P.Quint_0_25},
 	tween = {select = P.Quint_0_4, hover = P.Quint_0_25},
+	hint = {
+		size = UDim2.fromOffset(18, 18),
+		bottomOffset = 10,
+		zIndex = 110,
+		rotation = 180,
+		transparency = 0.35,
+		delay = 2.5,
+		bob = 4,
+		minOverflow = 4,
+		tween = {
+			fadeIn = P.Quint_0_5,
+			fadeOut = P.Quint_0_25,
+			settle = P.Quint_0_25,
+			bob = Animator.info(0.75, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+		},
+	},
 }
 
 end)
