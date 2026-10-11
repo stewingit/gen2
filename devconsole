@@ -1,0 +1,1158 @@
+-- Devconsole
+local ENGINE_URL = 'https://raw.githubusercontent.com/stewingit/gen2/refs/heads/main/Engine'
+
+local registry = (getgenv and getgenv()) or shared
+if type(registry.Devconsole) == 'table' and registry.Devconsole.Destroy then
+	pcall(registry.Devconsole.Destroy)
+end
+
+local Engine = registry.StewfieldEngine
+if not Engine then
+	local canGet, httpGet = pcall(function() return game.HttpGet end)
+	assert(loadstring and canGet and httpGet, 'Devconsole: the Engine script is not loaded and this environment cannot download it (load Engine first)')
+	Engine = loadstring(game:HttpGet(ENGINE_URL))()
+end
+
+local Runtime, Root = Engine.runtime, Engine.root
+local function use(path)
+	local node = Root
+	for part in string.gmatch(path, '[^%.]+') do node = node[part] end
+	return Runtime.require(node)
+end
+
+local Animator = use('Core.Animator')
+local Styles = use('Core.StyleRegistry')
+local ThemeManager = use('Core.ThemeManager')
+local Renderer = use('Core.Renderer')
+local layouts = use('Core.LayoutManager.layouts')
+local variables = use('Core.StateManager.variables')
+local WindowFrame = use('Primitives.WindowFrame')
+local IconButton = use('Primitives.IconButton')
+local NavItem = use('Primitives.NavItem')
+local Page = use('Primitives.Page')
+local SearchBar = use('Primitives.SearchBar')
+local CollapsedFace = use('Primitives.CollapsedFace')
+local ButtonBase = use('Primitives.ButtonBase')
+local Switch = use('Primitives.Switch')
+local LogView = use('Primitives.LogView')
+
+local LogService = game:GetService('LogService')
+local UserInputService = game:GetService('UserInputService')
+local Players = game:GetService('Players')
+local ProximityPromptService = game:GetService('ProximityPromptService')
+local LocalPlayer = Players.LocalPlayer
+
+local showTimestamp = false
+local remoteLoggingEnabled = true
+local proximityLoggingEnabled = false
+local uiclick = false
+local touchInterestLoggingEnabled = false
+local clickDetectorLoggingEnabled = false
+local autoCopyEnabled = false
+local clickToSelectEnabled = false
+local filterUsername = false
+
+local logs = {}
+local loggedTouchParts = {}
+local TOUCH_COOLDOWN = 3.0
+
+local Colors = {
+	Success = Color3.fromRGB(87, 242, 135),
+	Danger = Color3.fromRGB(237, 66, 69),
+	Accent = Color3.fromRGB(88, 101, 242),
+}
+local COPY_GREEN, COPY_GREEN_STROKE = Styles.Accent.on, Styles.Accent.onStroke
+
+-- ===== Window =====
+local WIDTH = 600
+local camera = workspace.CurrentCamera
+local viewportHeight = camera and camera.ViewportSize.Y or 0
+local HEIGHT = 500
+if viewportHeight > 0 then HEIGHT = math.clamp(viewportHeight - 120, 380, 500) end
+local SIZE = UDim2.fromOffset(WIDTH, HEIGHT)
+local BUTTON_ROW_HEIGHT = Styles.Element.compactHeight
+local COLLAPSED_SIZE, COLLAPSED_POSITION = UDim2.fromOffset(185, 50), UDim2.new(0.5, 0, 0, 20)
+local DEFAULT_TWEEN = Animator.presets.Expo_0_4
+local presets = Animator.presets
+
+local layout = table.clone(layouts.top)
+layout.topbarHeight = 50
+layout.tabStripTop = 49
+layout.tabStripHeight = 34
+layout.chromeHeight = 49 + 34 + 3
+
+variables.setBrandFontAsset('rbxassetid://12187365364')
+local themeManager = ThemeManager.new{theme = 'default', label = 'Devconsole'}
+local renderer = Renderer.new{themeManager = themeManager}
+local theme = themeManager.theme
+
+local W = {
+	name = 'DEV CONSOLE+',
+	layout = layout,
+	size = SIZE,
+	renderer = renderer,
+	themeManager = themeManager,
+	theme = theme,
+	instances = renderer.instances,
+	connections = renderer.connections,
+	showName = 'DEV CONSOLE+',
+	showIcon = 'terminal',
+	showIconOnly = false,
+	hidden = true,
+	animating = false,
+	unloaded = false,
+	_collapsedShown = false,
+}
+renderer.interactive = function() return not W.animating and not W.hidden end
+
+local alive = true
+W.logs = logs
+
+WindowFrame.shell(renderer, W)
+WindowFrame.chrome(renderer, W)
+W.bottomFade.Visible = false
+WindowFrame.tabStrip(renderer, W)
+WindowFrame.actionBar(renderer, W)
+SearchBar.build(renderer, W)
+W.searchPage:Destroy()
+W.searchInput.PlaceholderText = 'Search logs...'
+
+local DragBar = use('Primitives.DragBar')
+local dragBar = {window = W}
+DragBar.build(renderer, dragBar)
+
+local function syncDragBar()
+	local position = W.main.Position
+	dragBar.drag.Position = UDim2.new(position.X.Scale, position.X.Offset, position.Y.Scale, position.Y.Offset + SIZE.Y.Offset / 2 + Styles.DragBar.gap)
+end
+
+local function reveal(instance, goals, animate, tween)
+	if not instance then return end
+	if animate then
+		Animator.play(instance, tween or DEFAULT_TWEEN, goals)
+	else
+		for property, value in goals do instance[property] = value end
+	end
+end
+
+local function glow(parent, token, radius, transparency)
+	return renderer:CreateGlow(parent, token, radius, transparency)
+end
+
+-- ===== Pages: console and settings =====
+local consoleTab = {name = 'Console', icon = 'terminal', customOrder = 0, window = W}
+local settingsTab = {name = 'Settings', customOrder = 1000, window = W}
+
+Page.build(renderer, consoleTab, W.elements)
+Page.build(renderer, settingsTab, W.elements)
+for _, tab in {consoleTab, settingsTab} do
+	local padding = tab.tabPage:FindFirstChildOfClass('UIPadding')
+	if padding then padding.PaddingBottom = UDim.new(0, 10) end
+end
+
+W.selectedTab = consoleTab
+local function jumpTo(tab)
+	W.selectedTab = tab
+	W.elementsLayout:JumpTo(tab.tabPage)
+end
+
+-- ===== Console =====
+local pageHeight = SIZE.Y.Offset - layout.chromeHeight
+local consolePanelHeight = pageHeight - 10 - 10 - BUTTON_ROW_HEIGHT - Styles.Page.gap - Styles.Console.pad * 2 - 2
+consoleTab.tabPage.ScrollingEnabled = false
+
+local console = {tab = consoleTab, height = consolePanelHeight, _textTransparency = 1}
+LogView.build(renderer, console)
+console.main.LayoutOrder = 1
+
+local scroll = console.scroll
+console.scrollLayout.Padding = UDim.new(0, 3)
+scroll.ScrollingEnabled = true
+scroll.ScrollBarThickness = 4
+scroll.ScrollBarImageTransparency = 0.6
+scroll.ScrollBarImageColor3 = Color3.fromRGB(255, 255, 255)
+renderer:Create('UIPadding', {PaddingRight = UDim.new(0, 8), Parent = scroll})
+local function atBottom()
+	return scroll.CanvasPosition.Y + scroll.AbsoluteWindowSize.Y >= scroll.AbsoluteCanvasSize.Y - 6
+end
+local function pinToBottom()
+	if not scroll.Parent then return end
+	scroll.CanvasPosition = Vector2.new(0, scroll.AbsoluteCanvasSize.Y)
+end
+
+local shownElements = {}
+
+local function cardShown(element, shown, animate)
+	if shown then
+		reveal(element.stroke, {Transparency = theme.ElementStrokeTransparency}, animate)
+		reveal(element.title, {TextTransparency = 0}, animate)
+		reveal(element.main, {BackgroundTransparency = theme.ElementTransparency or 0}, animate)
+		if element.iconLabel then reveal(element.iconLabel, {ImageTransparency = 0}, animate) end
+	else
+		reveal(element.stroke, {Transparency = 1}, animate)
+		reveal(element.title, {TextTransparency = 1}, animate)
+		reveal(element.main, {BackgroundTransparency = 1}, animate)
+		if element.iconLabel then reveal(element.iconLabel, {ImageTransparency = 1}, animate) end
+	end
+end
+
+local CS = Styles.Console.shown
+local function consoleShown(shown, animate)
+	reveal(console.main, {BackgroundTransparency = if shown then theme.ElementTransparency or 0 else 1}, animate)
+	reveal(console.stroke, {Transparency = if shown then theme.ElementStrokeTransparency else 1}, animate)
+	reveal(console.panel, {BackgroundTransparency = if shown then CS.panel else 1}, animate)
+	reveal(console.panelStroke, {Transparency = if shown then CS.panelStroke else 1}, animate)
+	console._textTransparency = if shown then CS.text else 1
+	reveal(scroll, {ScrollBarImageTransparency = if shown then 0.6 else 1}, animate)
+	for _, data in logs do
+		reveal(data.label, {TextTransparency = console._textTransparency}, animate)
+	end
+end
+table.insert(shownElements, {page = consoleTab, setShown = consoleShown})
+
+local function applyFilters(text)
+	local processed = text
+	if filterUsername and LocalPlayer then
+		processed = string.gsub(processed, LocalPlayer.Name, 'game:GetService("Players").LocalPlayer.Name')
+	end
+	return processed
+end
+
+local function searchText()
+	return string.lower(W.searchInput.Text or '')
+end
+
+local function updateLogs()
+	local query = searchText()
+	local anyVisible = false
+	for _, data in pairs(logs) do
+		local text = showTimestamp and (data.time .. data.msg) or data.msg
+		local filteredText = applyFilters(text)
+		data.label.Text = filteredText
+		local match = (query == '' or string.find(string.lower(filteredText), query, 1, true) ~= nil)
+		data.label.Visible = match
+		anyVisible = anyVisible or match
+	end
+	W.searchEmpty.Visible = (not anyVisible) and query ~= ''
+end
+
+local function getFormattedPath(instance)
+	local parts = {}
+	local current = instance
+	while current and current ~= game do
+		table.insert(parts, 1, current.Name)
+		current = current.Parent
+	end
+	return table.concat(parts, '.')
+end
+
+local function serializeTable(val, indent)
+	indent = indent or 1
+	local tabs = string.rep('\t', indent)
+	local prevTabs = string.rep('\t', indent - 1)
+	if type(val) == 'table' then
+		local res = '{\n'
+		local keys = {}
+		for k in pairs(val) do table.insert(keys, k) end
+		for i, k in ipairs(keys) do
+			local keyStr = (type(k) == 'string') and k .. ' = ' or (type(k) == 'number' and k ~= i and '[' .. tostring(k) .. '] = ' or '')
+			res = res .. tabs .. keyStr .. serializeTable(val[k], indent + 1) .. (i == #keys and '' or ',') .. '\n'
+		end
+		return res .. prevTabs .. '}'
+	elseif type(val) == 'string' then
+		return '"' .. val .. '"'
+	elseif typeof(val) == 'Instance' then
+		return 'game.' .. val:GetFullName()
+	else
+		return tostring(val)
+	end
+end
+
+local function copyText(text)
+	local clip = (getgenv and getgenv().setclipboard) or setclipboard
+	if clip then
+		clip(text)
+		return true
+	end
+	return false
+end
+
+local function flashCopied(label, defaultColor)
+	local token = (label:GetAttribute('flash') or 0) + 1
+	label:SetAttribute('flash', token)
+	Animator.play(label, presets.Quint_0_1, {TextColor3 = COPY_GREEN_STROKE, BackgroundColor3 = COPY_GREEN, BackgroundTransparency = 0.55})
+	task.delay(0.22, function()
+		if label:GetAttribute('flash') ~= token or not label.Parent then return end
+		Animator.play(label, presets.Quint_0_45, {TextColor3 = defaultColor, BackgroundTransparency = 1})
+	end)
+end
+
+local function addLog(message, messageType)
+	if not alive then return end
+	local timestamp = '[' .. os.date('%X') .. '] '
+	local cleanMsg = tostring(message)
+	local wasAtBottom = atBottom()
+
+	local label = LogView.makeLine(renderer, console)
+	label.BackgroundColor3 = COPY_GREEN
+	label.BackgroundTransparency = 1
+	renderer:Create('UICorner', {CornerRadius = UDim.new(0, 4), Parent = label})
+
+	local defaultColor = Color3.fromRGB(220, 220, 225)
+	if messageType == 'REMOTE' then
+		defaultColor = Color3.fromRGB(52, 152, 219)
+	elseif messageType == 'PROXIMITY' then
+		defaultColor = Color3.fromRGB(230, 126, 34)
+	elseif messageType == 'UICLICK' then
+		defaultColor = Color3.fromRGB(155, 89, 182)
+	elseif messageType == 'TOUCH' then
+		defaultColor = Color3.fromRGB(26, 188, 156)
+	elseif messageType == 'CLICKDETECTOR' then
+		defaultColor = Color3.fromRGB(255, 118, 117)
+	elseif messageType == 'SELECT' then
+		defaultColor = Color3.fromRGB(241, 196, 15)
+	elseif messageType == 'SYSTEM' then
+		defaultColor = Colors.Success
+	elseif messageType == Enum.MessageType.MessageError then
+		defaultColor = Colors.Danger
+	elseif messageType == Enum.MessageType.MessageWarning then
+		defaultColor = Color3.fromRGB(241, 196, 15)
+	end
+
+	label.TextColor3 = defaultColor
+	local finalMsg = showTimestamp and (timestamp .. cleanMsg) or cleanMsg
+	local filteredFinal = applyFilters(finalMsg)
+	label.Text = filteredFinal
+	label.LayoutOrder = #logs + 1
+	label.TextTransparency = console._textTransparency
+	local data = {label = label, time = timestamp, msg = cleanMsg, color = defaultColor}
+	table.insert(logs, data)
+
+	local query = searchText()
+	if query ~= '' then
+		label.Visible = string.find(string.lower(filteredFinal), query, 1, true) ~= nil
+	end
+
+	if autoCopyEnabled and setclipboard then
+		local full = ''
+		for _, v in pairs(logs) do
+			if v.label.Visible then full = full .. v.label.Text .. '\n' end
+		end
+		setclipboard(full)
+	end
+
+	local lastClick = 0
+	renderer:Connect(label.InputBegan, function(input)
+		local inputType = input.UserInputType
+		if inputType ~= Enum.UserInputType.MouseButton1 and inputType ~= Enum.UserInputType.Touch then return end
+		local now = tick()
+		if now - lastClick < 0.4 and setclipboard then
+			setclipboard(applyFilters(cleanMsg))
+			flashCopied(label, defaultColor)
+		end
+		lastClick = now
+	end)
+
+	if wasAtBottom then
+		task.defer(pinToBottom)
+	end
+end
+
+local buttonRow = renderer:Create('Frame', {Name = 'Buttons', Size = UDim2.new(1, Styles.Console.inset, 0, BUTTON_ROW_HEIGHT), BackgroundTransparency = 1, BorderSizePixel = 0, LayoutOrder = 2, Parent = consoleTab.tabPage})
+renderer:Create('UIListLayout', {FillDirection = Enum.FillDirection.Horizontal, VerticalAlignment = Enum.VerticalAlignment.Center, HorizontalFlex = Enum.UIFlexAlignment.Fill, Padding = UDim.new(0, 7), SortOrder = Enum.SortOrder.LayoutOrder, Parent = buttonRow})
+
+local function guarded(fn)
+	return function()
+		local ok, err = pcall(fn)
+		if not ok then addLog('-- BUTTON ERROR\n' .. tostring(err), Enum.MessageType.MessageError) end
+	end
+end
+
+local function createBottomButton(name, icon, callback)
+	local element = {tab = {tabPage = buttonRow}, name = name, icon = icon}
+	ButtonBase.buildCompact(renderer, element, guarded(callback))
+	table.insert(shownElements, {page = consoleTab, setShown = function(shown, animate) cardShown(element, shown, animate) end})
+	return element
+end
+
+createBottomButton('Clear', 'trash-2', function()
+	for _, v in pairs(logs) do v.label:Destroy() end
+	table.clear(logs)
+	W.searchEmpty.Visible = false
+end)
+
+createBottomButton('Copy All', 'copy', function()
+	local full = ''
+	for _, v in pairs(logs) do
+		if v.label.Visible then full = full .. v.label.Text .. '\n' end
+	end
+	if setclipboard then setclipboard(full) end
+end)
+
+createBottomButton('Coords', 'map-pin', function()
+	if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild('HumanoidRootPart') then
+		local cf = LocalPlayer.Character.HumanoidRootPart.CFrame
+		addLog('-- PLAYER COORDINATES\n' .. tostring(cf), Enum.MessageType.MessageInfo)
+	else
+		addLog('-- PLAYER COORDINATES\nCharacter position could not be found.', Enum.MessageType.MessageWarning)
+	end
+end)
+
+createBottomButton('Server', 'server', function()
+	local placeName = 'Unknown'
+	pcall(function()
+		placeName = game:GetService('MarketplaceService'):GetProductInfo(game.PlaceId).Name
+	end)
+	local info = string.format('Place Name: %s | Place ID: %s', placeName, game.PlaceId)
+	addLog(info, Enum.MessageType.MessageInfo)
+end)
+
+speeds = 2
+
+local speaker = game:GetService('Players').LocalPlayer
+
+local chr = game.Players.LocalPlayer.Character
+local hum = chr and chr:FindFirstChildWhichIsA('Humanoid')
+
+nowe = false
+
+local function toggleFly()
+
+	if nowe == true then
+		nowe = false
+
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Flying,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Freefall,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.GettingUp,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Landed,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Running,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.RunningNoPhysics,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.StrafingNoPhysics,true)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming,true)
+		speaker.Character.Humanoid:ChangeState(Enum.HumanoidStateType.RunningNoPhysics)
+	else
+		nowe = true
+
+		for i = 1, speeds do
+			spawn(function()
+
+				local hb = game:GetService('RunService').Heartbeat
+
+				tpwalking = true
+				local chr = game.Players.LocalPlayer.Character
+				local hum = chr and chr:FindFirstChildWhichIsA('Humanoid')
+				while tpwalking and hb:Wait() and chr and hum and hum.Parent do
+					if hum.MoveDirection.Magnitude > 0 then
+						chr:TranslateBy(hum.MoveDirection)
+					end
+				end
+
+			end)
+		end
+		game.Players.LocalPlayer.Character.Animate.Disabled = true
+		local Char = game.Players.LocalPlayer.Character
+		local Hum = Char:FindFirstChildOfClass('Humanoid') or Char:FindFirstChildOfClass('AnimationController')
+
+		for i,v in next, Hum:GetPlayingAnimationTracks() do
+			v:AdjustSpeed(0)
+		end
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Climbing,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Flying,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Freefall,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.GettingUp,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Landed,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Physics,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.PlatformStanding,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Running,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.RunningNoPhysics,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Seated,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.StrafingNoPhysics,false)
+		speaker.Character.Humanoid:SetStateEnabled(Enum.HumanoidStateType.Swimming,false)
+		speaker.Character.Humanoid:ChangeState(Enum.HumanoidStateType.Swimming)
+	end
+
+	if game:GetService('Players').LocalPlayer.Character:FindFirstChildOfClass('Humanoid').RigType == Enum.HumanoidRigType.R6 then
+
+		local plr = game.Players.LocalPlayer
+		local torso = plr.Character.Torso
+		local flying = true
+		local deb = true
+		local ctrl = {f = 0, b = 0, l = 0, r = 0}
+		local lastctrl = {f = 0, b = 0, l = 0, r = 0}
+		local maxspeed = 50
+		local speed = 0
+
+		local bg = Instance.new('BodyGyro', torso)
+		bg.P = 9e4
+		bg.maxTorque = Vector3.new(9e9, 9e9, 9e9)
+		bg.cframe = torso.CFrame
+		local bv = Instance.new('BodyVelocity', torso)
+		bv.velocity = Vector3.new(0,0.1,0)
+		bv.maxForce = Vector3.new(9e9, 9e9, 9e9)
+		if nowe == true then
+			plr.Character.Humanoid.PlatformStand = true
+		end
+		while nowe == true or game:GetService('Players').LocalPlayer.Character.Humanoid.Health == 0 do
+			game:GetService('RunService').RenderStepped:Wait()
+
+			if ctrl.l + ctrl.r ~= 0 or ctrl.f + ctrl.b ~= 0 then
+				speed = speed+.5+(speed/maxspeed)
+				if speed > maxspeed then
+					speed = maxspeed
+				end
+			elseif not (ctrl.l + ctrl.r ~= 0 or ctrl.f + ctrl.b ~= 0) and speed ~= 0 then
+				speed = speed-1
+				if speed < 0 then
+					speed = 0
+				end
+			end
+			if (ctrl.l + ctrl.r) ~= 0 or (ctrl.f + ctrl.b) ~= 0 then
+				bv.velocity = ((game.Workspace.CurrentCamera.CoordinateFrame.lookVector * (ctrl.f+ctrl.b)) + ((game.Workspace.CurrentCamera.CoordinateFrame * CFrame.new(ctrl.l+ctrl.r,(ctrl.f+ctrl.b)*.2,0).p) - game.Workspace.CurrentCamera.CoordinateFrame.p))*speed
+				lastctrl = {f = ctrl.f, b = ctrl.b, l = ctrl.l, r = ctrl.r}
+			elseif (ctrl.l + ctrl.r) == 0 and (ctrl.f + ctrl.b) == 0 and speed ~= 0 then
+				bv.velocity = ((game.Workspace.CurrentCamera.CoordinateFrame.lookVector * (lastctrl.f+lastctrl.b)) + ((game.Workspace.CurrentCamera.CoordinateFrame * CFrame.new(lastctrl.l+lastctrl.r,(lastctrl.f+lastctrl.b)*.2,0).p) - game.Workspace.CurrentCamera.CoordinateFrame.p))*speed
+			else
+				bv.velocity = Vector3.new(0,0,0)
+			end
+			bg.cframe = game.Workspace.CurrentCamera.CoordinateFrame * CFrame.Angles(-math.rad((ctrl.f+ctrl.b)*50*speed/maxspeed),0,0)
+		end
+		ctrl = {f = 0, b = 0, l = 0, r = 0}
+		lastctrl = {f = 0, b = 0, l = 0, r = 0}
+		speed = 0
+		bg:Destroy()
+		bv:Destroy()
+		plr.Character.Humanoid.PlatformStand = false
+		game.Players.LocalPlayer.Character.Animate.Disabled = false
+		tpwalking = false
+
+	else
+		local plr = game.Players.LocalPlayer
+		local UpperTorso = plr.Character.UpperTorso
+		local flying = true
+		local deb = true
+		local ctrl = {f = 0, b = 0, l = 0, r = 0}
+		local lastctrl = {f = 0, b = 0, l = 0, r = 0}
+		local maxspeed = 50
+		local speed = 0
+
+		local bg = Instance.new('BodyGyro', UpperTorso)
+		bg.P = 9e4
+		bg.maxTorque = Vector3.new(9e9, 9e9, 9e9)
+		bg.cframe = UpperTorso.CFrame
+		local bv = Instance.new('BodyVelocity', UpperTorso)
+		bv.velocity = Vector3.new(0,0.1,0)
+		bv.maxForce = Vector3.new(9e9, 9e9, 9e9)
+		if nowe == true then
+			plr.Character.Humanoid.PlatformStand = true
+		end
+		while nowe == true or game:GetService('Players').LocalPlayer.Character.Humanoid.Health == 0 do
+			wait()
+
+			if ctrl.l + ctrl.r ~= 0 or ctrl.f + ctrl.b ~= 0 then
+				speed = speed+.5+(speed/maxspeed)
+				if speed > maxspeed then
+					speed = maxspeed
+				end
+			elseif not (ctrl.l + ctrl.r ~= 0 or ctrl.f + ctrl.b ~= 0) and speed ~= 0 then
+				speed = speed-1
+				if speed < 0 then
+					speed = 0
+				end
+			end
+			if (ctrl.l + ctrl.r) ~= 0 or (ctrl.f + ctrl.b) ~= 0 then
+				bv.velocity = ((game.Workspace.CurrentCamera.CoordinateFrame.lookVector * (ctrl.f+ctrl.b)) + ((game.Workspace.CurrentCamera.CoordinateFrame * CFrame.new(ctrl.l+ctrl.r,(ctrl.f+ctrl.b)*.2,0).p) - game.Workspace.CurrentCamera.CoordinateFrame.p))*speed
+				lastctrl = {f = ctrl.f, b = ctrl.b, l = ctrl.l, r = ctrl.r}
+			elseif (ctrl.l + ctrl.r) == 0 and (ctrl.f + ctrl.b) == 0 and speed ~= 0 then
+				bv.velocity = ((game.Workspace.CurrentCamera.CoordinateFrame.lookVector * (lastctrl.f+lastctrl.b)) + ((game.Workspace.CurrentCamera.CoordinateFrame * CFrame.new(lastctrl.l+lastctrl.r,(lastctrl.f+lastctrl.b)*.2,0).p) - game.Workspace.CurrentCamera.CoordinateFrame.p))*speed
+			else
+				bv.velocity = Vector3.new(0,0,0)
+			end
+
+			bg.cframe = game.Workspace.CurrentCamera.CoordinateFrame * CFrame.Angles(-math.rad((ctrl.f+ctrl.b)*50*speed/maxspeed),0,0)
+		end
+		ctrl = {f = 0, b = 0, l = 0, r = 0}
+		lastctrl = {f = 0, b = 0, l = 0, r = 0}
+		speed = 0
+		bg:Destroy()
+		bv:Destroy()
+		plr.Character.Humanoid.PlatformStand = false
+		game.Players.LocalPlayer.Character.Animate.Disabled = false
+		tpwalking = false
+	end
+end
+
+createBottomButton('Fly', 'plane', function()
+	task.spawn(toggleFly)
+end)
+
+local TG = Styles.Toggle
+local function createToggle(name, default, callback)
+	local element = {tab = settingsTab, window = W, name = name, value = default}
+	local function perform()
+		element.value = not element.value
+		Switch.animate(renderer, element)
+		local ok, err = pcall(callback, element.value)
+		if not ok then addLog('-- SETTINGS ERROR\n' .. tostring(err), Enum.MessageType.MessageError) end
+	end
+	ButtonBase.buildFull(renderer, element, perform, {
+		style = TG.full,
+		press = TG.press,
+		control = function()
+			Switch.build(renderer, element, element.main, glow)
+			element.functionContainer.Position = TG.full.switchPosition
+			element.functionContainer.AnchorPoint = TG.full.switchAnchor
+		end,
+	})
+	table.insert(shownElements, {page = settingsTab, setShown = function(shown, animate)
+		cardShown(element, shown, animate)
+		Switch.setShown(function(instance, goals, info, tween) reveal(instance, goals, info, tween) end, renderer, element, shown, animate)
+	end})
+	return element
+end
+
+createToggle('Show Log Timestamps', false, function(s) showTimestamp = s; updateLogs() end)
+createToggle('Remote Event Logs', true, function(s) remoteLoggingEnabled = s end)
+createToggle('Proximity Prompt Logs', false, function(s) proximityLoggingEnabled = s end)
+createToggle('GUI Interaction Logs', false, function(s) uiclick = s end)
+createToggle('Touch Interest Logs', false, function(s) touchInterestLoggingEnabled = s end)
+createToggle('Click Detector Logs', false, function(s) clickDetectorLoggingEnabled = s end)
+createToggle('Auto-Copy Logs', false, function(s) autoCopyEnabled = s end)
+createToggle("3D Click-to-Select Part's", false, function(s) clickToSelectEnabled = s end)
+createToggle('Anonymise Local Username', false, function(s) filterUsername = s; updateLogs() end)
+
+local destroyElement = {tab = settingsTab, window = W, name = 'Completely Delete Console', icon = 'trash-2'}
+ButtonBase.buildFull(renderer, destroyElement, function() W.Destroy() end, {style = Styles.Button.full, press = Styles.Button.press})
+table.insert(shownElements, {page = settingsTab, setShown = function(shown, animate) cardShown(destroyElement, shown, animate) end})
+
+NavItem.build(renderer, consoleTab, layout)
+do
+	local pill = consoleTab.topbarItem
+	local margin = Styles.Window.tabStrip.padLeft
+	pill.AutomaticSize = Enum.AutomaticSize.None
+	pill.Size = UDim2.fromOffset(SIZE.X.Offset - margin * 2, Styles.NavItem.top.height)
+	W.tabList.ScrollingEnabled = false
+	local container = consoleTab.topbarItemContainer
+	container.AnchorPoint = Vector2.new(0.5, 0)
+	container.Position = UDim2.fromScale(0.5, 0)
+end
+
+local states = Styles.NavItem.states.top
+local function tabVisual(name, tween)
+	NavItem.applyVisual(consoleTab, states[name], tween)
+end
+
+local actions = {}
+local function createAction(name, icon, order, callback)
+	local action = {name = name}
+	IconButton.build(renderer, action, {name = name, icon = icon, parent = W.actionContainer, order = order})
+	action.lit = false
+	local function rest()
+		if W.hidden or W.animating then return end
+		if action.lit then return end
+		IconButton.fade(action, 'rest')
+	end
+	IconButton.wire(renderer, action, {
+		canHover = function() return not W.animating and not W.hidden end,
+		onClick = function() task.spawn(function() pcall(callback) rest() end) end,
+		onLeave = rest,
+	})
+	function action.setLit(lit)
+		action.lit = lit
+		Animator.play(action.iconLabel, presets.Quint_0_25, {ImageTransparency = if lit then Styles.Search.action.litTransparency else Styles.Action.fade.rest})
+	end
+	actions[name] = action
+	return action
+end
+
+-- ===== Search =====
+local searching = false
+local SEARCH_TWEEN = presets.Quint_0_25
+
+local function openSearch()
+	if searching or W.hidden or W.animating then return end
+	searching = true
+	tabVisual('hidden', SEARCH_TWEEN)
+	task.delay(SEARCH_TWEEN.Time, function()
+		if searching then W.tabList.Visible = false end
+	end)
+	W.searchPill.Visible = true
+	SearchBar.fade(W, true, SEARCH_TWEEN)
+	W.searchInput:CaptureFocus()
+	actions.Search.setLit(true)
+end
+
+local function closeSearch()
+	if not searching then return end
+	searching = false
+	W.searchInput.Text = ''
+	W.searchInput:ReleaseFocus()
+	W.searchEmpty.Visible = false
+	updateLogs()
+	SearchBar.fade(W, false, SEARCH_TWEEN)
+	task.delay(SEARCH_TWEEN.Time, function()
+		if not searching then W.searchPill.Visible = false end
+	end)
+	W.tabList.Visible = true
+	tabVisual(if W.selectedTab == consoleTab then 'selected' else 'unselected', SEARCH_TWEEN)
+	actions.Search.setLit(false)
+end
+
+renderer:Connect(W.searchInput:GetPropertyChangedSignal('Text'), function()
+	if searching then updateLogs() end
+end)
+
+-- ===== Settings open/close =====
+local function showSettings(open)
+	if open then
+		if searching then closeSearch() end
+		jumpTo(settingsTab)
+		tabVisual('unselected', presets.Quint_0_4)
+		actions.Settings.setLit(true)
+	else
+		jumpTo(consoleTab)
+		tabVisual('selected', presets.Quint_0_4)
+		actions.Settings.setLit(false)
+	end
+end
+
+local function selectConsole()
+	showSettings(false)
+	Page.spinGradients(consoleTab)
+end
+
+local function toggleSettings()
+	if W.hidden then return end
+	if W.selectedTab == settingsTab then selectConsole() else showSettings(true) end
+end
+
+local function clampedPosition(position)
+	if position.X.Scale ~= 0 or position.Y.Scale ~= 0 then return position end
+	local screen, halfX, halfY, margin = W.screenGui.AbsoluteSize, SIZE.X.Offset / 2, SIZE.Y.Offset / 2, 8
+	local x = math.clamp(position.X.Offset, halfX + margin, math.max(halfX + margin, screen.X - halfX - margin))
+	local y = math.clamp(position.Y.Offset, halfY + margin, math.max(halfY + margin, screen.Y - halfY - margin))
+	if x == position.X.Offset and y == position.Y.Offset then return position end
+	return UDim2.fromOffset(x, y)
+end
+
+local function setContentVisible(visible)
+	W.elements.Visible = visible
+	W.tabList.Visible = visible and not searching
+end
+
+local function fadeSurfaces(shown, tween)
+	reveal(W.windowShadow, {Transparency = if shown then 0.6 else 1}, tween, tween)
+	reveal(W.windowStroke, {Transparency = if shown then 0.95 else 1}, tween, tween)
+end
+
+local function fadeTopbar(shown, tween)
+	reveal(W.title, {TextTransparency = if shown then 0 else 1}, tween, tween)
+	for _, action in actions do
+		if action.lit and shown then
+			reveal(action.iconLabel, {ImageTransparency = Styles.Search.action.litTransparency}, tween, tween)
+		else
+			reveal(action.iconLabel, {ImageTransparency = if shown then Styles.Action.fade.rest else 1}, tween, tween)
+		end
+	end
+	if shown then
+		W.tabList.Visible = not searching
+		consoleTab.topbarItem.Visible = true
+		tabVisual(if searching then 'hidden' elseif W.selectedTab == consoleTab then 'selected' else 'unselected', tween)
+		if searching then
+			W.searchPill.Visible = true
+			SearchBar.fade(W, true, tween)
+		end
+	else
+		tabVisual('hidden', tween)
+		if searching then SearchBar.fade(W, false, tween) end
+	end
+end
+
+local function revealElements(shown, animate, stagger)
+	for _, entry in shownElements do
+		entry.setShown(shown, animate)
+		if shown and animate and stagger and entry.page == W.selectedTab then task.wait(stagger) end
+	end
+end
+
+local function collapsedRect()
+	local size = if W.showIconOnly then UDim2.fromOffset(50, 50) else COLLAPSED_SIZE
+	if W._collapsedPosition then return W._collapsedPosition, size end
+	return UDim2.new(COLLAPSED_POSITION.X.Scale, COLLAPSED_POSITION.X.Offset, COLLAPSED_POSITION.Y.Scale, COLLAPSED_POSITION.Y.Offset + size.Y.Offset / 2), size
+end
+
+function W.Hide()
+	if W.animating or W.hidden then return end
+	W.animating = true
+	W.hidden = true
+	W.collapsedInteract.Visible = false
+	W._restorePosition = W.main.Position
+	local position, size = collapsedRect()
+	local fast, move, corner, face = presets.Quint_0_18, presets.ExpoInOut_0_35, presets.ExpoInOut_0_35, presets.Quint_0_2
+	Animator.play(dragBar.dragCosmetic, fast, {Size = UDim2.fromOffset(0, 4), BackgroundTransparency = 1})
+	task.delay(0.18, function()
+		if W.hidden then dragBar.drag.Visible = false end
+	end)
+	fadeSurfaces(false, fast)
+	fadeTopbar(false, fast)
+	revealElements(false, true)
+	local tween = Animator.play(W.main, move, {Size = size, Position = position})
+	tween.Completed:Connect(function()
+		if W.unloaded or not W.hidden then return end
+		W._collapsedShown = true
+		W.collapsedInteract.Visible = true
+		W.animating = false
+	end)
+	Animator.play(W.windowCorner, corner, {CornerRadius = UDim.new(1, 0)})
+	task.delay(0.18, function()
+		if not W.hidden then return end
+		W.topbar.Visible = false
+		setContentVisible(false)
+		CollapsedFace.setShown(W, true, face)
+	end)
+end
+
+local function restore()
+	local position = clampedPosition(W._restorePosition or UDim2.new(0.5, 0, 0.5, 0))
+	W._restorePosition = position
+	local move, corner, fade = presets.ExpoInOut_0_35, presets.ExpoInOut_0_35, presets.Expo_0_28
+	CollapsedFace.setShown(W, false, presets.Quint_0_15)
+	local tween = Animator.play(W.main, move, {Size = SIZE, Position = position})
+	tween.Completed:Connect(function()
+		if W.hidden or W.unloaded then return end
+		W._collapsedShown = false
+	end)
+	Animator.play(W.windowCorner, corner, {CornerRadius = theme.CornerRoundness})
+	task.delay(0.22, function()
+		if W.hidden or W.unloaded then return end
+		W.topbar.Visible = true
+		setContentVisible(true)
+		fadeSurfaces(true, fade)
+		fadeTopbar(true, fade)
+		task.spawn(revealElements, true, true, 0.03)
+	end)
+	task.delay(0.22, function()
+		if W.hidden or W.unloaded then return end
+		syncDragBar()
+		dragBar.dragCosmetic.Size = UDim2.fromOffset(0, 4)
+		dragBar.dragCosmetic.BackgroundTransparency = 1
+		dragBar.drag.Visible = true
+		Animator.play(dragBar.dragCosmetic, move, {Size = UDim2.fromOffset(100, 4), BackgroundTransparency = 0.7})
+	end)
+	task.delay(0.6, function() W.animating = false end)
+end
+
+local function firstShow()
+	setContentVisible(true)
+	W.main.Visible = true
+	Animator.play(W.main, presets.ExpoInOut_1, {BackgroundTransparency = 0, Size = SIZE})
+	task.wait(0.85)
+	if W.unloaded then return end
+	fadeSurfaces(true, presets.Expo_0_6)
+	task.wait(0.3)
+	if W.unloaded then return end
+	fadeTopbar(true, presets.Expo_0_4)
+	task.wait(0.1)
+	task.spawn(revealElements, true, true, 0.03)
+	task.wait(1)
+	if W.unloaded then return end
+	syncDragBar()
+	dragBar.drag.Visible = true
+	Animator.play(dragBar.dragCosmetic, presets.Expo_0_6, {BackgroundTransparency = 0.7})
+	Animator.play(dragBar.dragCosmetic, presets.Expo_1, {Size = UDim2.fromOffset(100, 4)})
+	W.animating = false
+end
+
+function W.Show()
+	if W.animating or not W.hidden then return end
+	W.animating = true
+	W.hidden = false
+	W.collapsedInteract.Visible = false
+	if W._hasShownOnce then restore() else W._hasShownOnce = true firstShow() end
+end
+
+function W.ToggleHide()
+	if W.animating then return end
+	if W.hidden then W.Show() else W.Hide() end
+end
+
+createAction('Close', Styles.Icons.close, 1, function() W.ToggleHide() end)
+createAction('Settings', Styles.Icons.settings, 2, toggleSettings)
+createAction('Search', Styles.Icons.search, 3, function()
+	if searching then closeSearch() else openSearch() end
+end)
+
+-- ===== Tab click / hover =====
+renderer:Connect(consoleTab.topbarItemInteract.MouseButton1Click, function()
+	if W.hidden or W.animating then return end
+	if W.selectedTab ~= consoleTab then selectConsole() end
+end)
+renderer:Connect(consoleTab.topbarItemInteract.MouseEnter, function()
+	if W.hidden or W.animating or searching then return end
+	if W.selectedTab ~= consoleTab then
+		tabVisual('hover', Styles.Page.tween.hover)
+		Page.spinGradients(consoleTab)
+	end
+end)
+renderer:Connect(consoleTab.topbarItemInteract.MouseLeave, function()
+	if W.hidden or W.animating or searching then return end
+	if W.selectedTab ~= consoleTab then tabVisual('unselected', Styles.Page.tween.hover) end
+end)
+
+CollapsedFace.build(renderer, W)
+do
+	local collapsedPressed, collapsedMoved, grabOffset, startMouse = false, false, Vector2.zero, Vector2.zero
+	local dragThreshold = Styles.Collapsed.dragThreshold
+	local function inset()
+		if W.screenGui and W.screenGui.IgnoreGuiInset then return variables.guiService:GetGuiInset() end
+		return Vector2.zero
+	end
+	renderer:Connect(W.collapsedInteract.InputBegan, function(input, processed)
+		if processed or not W.hidden or W.animating then return end
+		local kind = input.UserInputType.Name
+		if kind ~= 'MouseButton1' and kind ~= 'Touch' then return end
+		collapsedPressed, collapsedMoved = true, false
+		startMouse = UserInputService:GetMouseLocation()
+		grabOffset = W.main.AbsolutePosition + W.main.AbsoluteSize * W.main.AnchorPoint - startMouse
+	end)
+	renderer:Connect(UserInputService.InputEnded, function(input)
+		local kind = input.UserInputType.Name
+		if kind ~= 'MouseButton1' and kind ~= 'Touch' then return end
+		if not collapsedPressed then return end
+		collapsedPressed = false
+		if collapsedMoved then
+			W._collapsedPosition = W.main.Position
+			return
+		end
+		W.ToggleHide()
+	end)
+	renderer:Connect(UserInputService.WindowFocusReleased, function() collapsedPressed = false end)
+	renderer:Connect(variables.runService.RenderStepped, function()
+		if not collapsedPressed then return end
+		if not W.hidden or W.animating then collapsedPressed = false return end
+		local mouse = UserInputService:GetMouseLocation()
+		if not collapsedMoved and (mouse - startMouse).Magnitude < dragThreshold then return end
+		collapsedMoved = true
+		local target = mouse + grabOffset + inset()
+		W.main.Position = UDim2.fromOffset(target.X, target.Y)
+	end)
+end
+
+do
+	local DS = Styles.DragBar
+	local dragging, grabOffset = false, Vector2.zero
+	local inset = Vector2.zero
+	if W.screenGui.IgnoreGuiInset then inset = variables.guiService:GetGuiInset() end
+
+	local function targets()
+		local mouse = UserInputService:GetMouseLocation() + grabOffset + inset
+		local x, y = mouse.X, mouse.Y
+		local main, screen, margin = W.main.AbsoluteSize, W.screenGui.AbsoluteSize, DS.screenMargin
+		local halfX, halfY = main.X / 2, main.Y / 2
+		x = math.clamp(x, halfX + margin, math.max(halfX + margin, screen.X - halfX - margin))
+		y = math.clamp(y, halfY + margin, math.max(halfY + margin, screen.Y - halfY - margin))
+		return UDim2.fromOffset(x, y), UDim2.fromOffset(x, y + (W.main.Size.Y.Offset / 2 + DS.gap))
+	end
+
+	local function interactive() return not W.animating and not W.hidden end
+
+	renderer:Connect(dragBar.drag.MouseEnter, function()
+		if not dragging and not W.hidden then DragBar.hover(dragBar, true) end
+	end)
+	renderer:Connect(dragBar.drag.MouseLeave, function()
+		if not dragging and not W.hidden then DragBar.hover(dragBar, false) end
+	end)
+
+	local function release()
+		if not dragging then return end
+		dragging = false
+		if not interactive() then return end
+		local mainPosition, barPosition = targets()
+		DragBar.release(dragBar, mainPosition, barPosition)
+	end
+
+	renderer:Connect(dragBar.dragInteract.InputBegan, function(input, processed)
+		if processed then return end
+		local kind = input.UserInputType.Name
+		if kind ~= 'MouseButton1' and kind ~= 'Touch' then return end
+		if not interactive() then return end
+		dragging = true
+		if W.screenGui.IgnoreGuiInset then inset = variables.guiService:GetGuiInset() end
+		grabOffset = W.main.AbsolutePosition + W.main.AbsoluteSize * W.main.AnchorPoint - UserInputService:GetMouseLocation()
+		DragBar.press(dragBar)
+	end)
+	renderer:Connect(UserInputService.InputEnded, function(input)
+		local kind = input.UserInputType.Name
+		if kind == 'MouseButton1' or kind == 'Touch' then release() end
+	end)
+	renderer:Connect(UserInputService.WindowFocusReleased, release)
+	renderer:Connect(variables.runService.RenderStepped, function(dt)
+		if not dragging then return end
+		if not interactive() then release() return end
+		local mainTarget, barTarget = targets()
+		DragBar.follow(dragBar, mainTarget, barTarget, dt)
+	end)
+end
+
+-- ===== Destroy =====
+function W.Destroy()
+	if W.unloaded then return end
+	W.unloaded = true
+	alive = false
+	for _, connection in renderer.connections do
+		pcall(function() connection:Disconnect() end)
+	end
+	table.clear(renderer.connections)
+	if W.screenGui then W.screenGui:Destroy() end
+	if registry.Devconsole == W then registry.Devconsole = nil end
+end
+
+registry.Devconsole = W
+
+-- ===== HOOKS =====
+if hookmetamethod then
+	local oldNamecall
+	oldNamecall = hookmetamethod(game, '__namecall', function(self, ...)
+		local method = getnamecallmethod()
+		if alive and remoteLoggingEnabled and not checkcaller() and (method == 'FireServer' or method == 'InvokeServer') then
+			local args = {...}
+			task.spawn(function()
+				local pathParts = self:GetFullName():split('.')
+				local formattedPath = 'game:GetService("' .. pathParts[1] .. '")'
+				for i = 2, #pathParts do
+					formattedPath = formattedPath .. ':WaitForChild("' .. pathParts[i] .. '")'
+				end
+				addLog(string.format('-- REMOTE EVENT\nPath: %s\nMethod: %s\nArgs: %s', formattedPath, method, serializeTable(args)), 'REMOTE')
+			end)
+		end
+		return oldNamecall(self, ...)
+	end)
+end
+
+renderer:Connect(LogService.MessageOut, function(msg, msgType)
+	addLog(msg, msgType)
+end)
+
+-- PROXIMITY PROMPT DETECTOR
+renderer:Connect(ProximityPromptService.PromptTriggered, function(prompt, player)
+	if proximityLoggingEnabled and player == LocalPlayer then
+		local logMsg = string.format('-- PROXIMITY PROMPT\nInteracted with: %s', prompt:GetFullName())
+		addLog(logMsg, 'PROXIMITY')
+	end
+end)
+
+-- UI CLICK DETECTOR
+local playerGui = LocalPlayer:WaitForChild('PlayerGui')
+local function getFullPath(instance)
+	local path = instance.Name
+	local current = instance.Parent
+	while current and current ~= game do
+		path = current.Name .. '.' .. path
+		current = current.Parent
+	end
+	return 'game.' .. path
+end
+
+local function setupButtonListener(element)
+	if element:IsA('GuiButton') then
+		renderer:Connect(element.MouseButton1Click, function()
+			if uiclick then
+				if element:IsDescendantOf(W.screenGui) then
+					return
+				end
+
+				local logMsg = string.format('-- GUI INTERACTION\nButton Name: %s\nFull Path: %s\nAbsolutePos: %s\nAbsoluteSize: %s',
+					element.Name,
+					getFullPath(element),
+					tostring(element.AbsolutePosition),
+					tostring(element.AbsoluteSize)
+				)
+				addLog(logMsg, 'UICLICK')
+			end
+		end)
+	end
+end
+
+for _, element in ipairs(playerGui:GetDescendants()) do
+	setupButtonListener(element)
+end
+renderer:Connect(playerGui.DescendantAdded, setupButtonListener)
+
+-- TOUCH INTEREST DETECTOR
+local function hookTouchInterest(p)
+	if p:IsA('BasePart') then
+		renderer:Connect(p.Touched, function(hit)
+			if not touchInterestLoggingEnabled then return end
+			local char = LocalPlayer.Character
+			if not char or not hit:IsDescendantOf(char) then return end
+			local pPath = p:GetFullName()
+			if loggedTouchParts[pPath] and tick() - loggedTouchParts[pPath] < TOUCH_COOLDOWN then return end
+			loggedTouchParts[pPath] = tick()
+			local logMsg = string.format('-- TOUCH INTEREST\nPart: %s\nTouched by: %s', pPath, hit.Name)
+			addLog(logMsg, 'TOUCH')
+		end)
+	end
+end
+
+for _, item in ipairs(workspace:GetDescendants()) do
+	hookTouchInterest(item)
+end
+renderer:Connect(workspace.DescendantAdded, hookTouchInterest)
+
+-- CLICK DETECTOR HOOKS
+local function hookClickDetector(cd)
+	if cd:IsA('ClickDetector') then
+		renderer:Connect(cd.MouseClick, function(player)
+			if clickDetectorLoggingEnabled and player == LocalPlayer then
+				local logMsg = string.format('-- CLICK DETECTOR\nInteracted with: %s', cd:GetFullName())
+				addLog(logMsg, 'CLICKDETECTOR')
+			end
+		end)
+	end
+end
+
+for _, item in ipairs(workspace:GetDescendants()) do
+	hookClickDetector(item)
+end
+renderer:Connect(workspace.DescendantAdded, hookClickDetector)
+
+-- CLICK PART TO SELECT (3D ESP)
+renderer:Connect(UserInputService.InputBegan, function(input, processed)
+	if processed then return end
+	if clickToSelectEnabled and (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) then
+		local mouse = LocalPlayer:GetMouse()
+		local target = mouse.Target
+		if target and target:IsA('BasePart') then
+			local logMsg = string.format('-- PART\n%s', target:GetFullName())
+			addLog(logMsg, 'SELECT')
+			task.spawn(function()
+				local highlight = Instance.new('Highlight')
+				highlight.FillColor = Colors.Accent
+				highlight.OutlineColor = Colors.Success
+				highlight.FillTransparency = 0.4
+				highlight.OutlineTransparency = 0
+				highlight.Adornee = target
+				highlight.Parent = W.screenGui
+				task.wait(1.5)
+				highlight:Destroy()
+			end)
+		end
+	end
+end)
+
+-- ===== Open =====
+addLog("DevConsole Ready. Double click on a log to instant copy. The console's features depends on your executors capabilities.", Enum.MessageType.MessageInfo)
+task.defer(function()
+	W.Show()
+end)
+
+return W
