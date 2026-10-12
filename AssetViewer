@@ -244,7 +244,7 @@ do
 	end)
 	renderer:Connect(window.searchInput.FocusLost, function(enterPressed)
 		Animator.play(window.searchStroke, Animator.presets.Quint_0_25, {Transparency = SB.shown.stroke})
-		if window:_interactive() then task.spawn(function() window:Search() end) end
+		if enterPressed and window:_interactive() then task.spawn(function() window:Search() end) end
 	end)
 end
 
@@ -615,7 +615,7 @@ Heading_(page, 'Notes', 'triangle-alert')
 Text_(page, {
 	name = '',
 	text = '\u{2022} Always use this script on an alt account\n'
-		.. '\u{2022} Downloading depends entirely on your executor's capabilities\n'
+		.. "\u{2022} Downloading depends entirely on your executor's capabilities\n"
 		.. '\u{2022} Assets download more reliably when accessed within the game that uses them.\n'
 		.. '\u{2022} Mobile executors work best',
 })
