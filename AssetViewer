@@ -1,0 +1,1402 @@
+-- Roblox Asset Viewer
+
+local ENGINE_URL = 'https://raw.githubusercontent.com/stewingit/gen2/refs/heads/main/Engine'
+local THEME = 'default' -- 'default' | 'rose' | 'ember' | 'frost' | 'amethyst' | 'cobalt'
+local FONT_ASSET = 'rbxassetid://12187365364'
+local SAVE_FOLDER = 'AssetViewer'
+local SPAWN_LIFETIME = 15
+
+local registry = (getgenv and getgenv()) or shared
+
+if registry.AssetViewerWindow then
+	pcall(function() registry.AssetViewerWindow:Unload() end)
+	registry.AssetViewerWindow = nil
+end
+
+local Engine = registry.StewfieldEngine
+if not Engine then
+	local canGet, httpGet = pcall(function() return game.HttpGet end)
+	assert(loadstring and canGet and httpGet, 'Asset Viewer: Engine is not loaded and this environment cannot download it')
+	Engine = loadstring(game:HttpGet(ENGINE_URL))()
+end
+
+local root = Engine.root
+local requireNode = Engine.runtime.require
+
+local variables = requireNode(root.Core.StateManager.variables)
+variables.setBrandFontAsset(FONT_ASSET) 
+
+local Animator = requireNode(root.Core.Animator)
+local Styles = requireNode(root.Core.StyleRegistry)
+local ThemeManager = requireNode(root.Core.ThemeManager)
+local Renderer = requireNode(root.Core.Renderer)
+local layouts = requireNode(root.Core.LayoutManager.layouts)
+local windowSizing = requireNode(root.Core.LayoutManager.windowSizing)
+local locale = requireNode(root.Core.Utilities.locale)
+local Haptic = requireNode(root.Core.Utilities.HapticEngine)
+local log = requireNode(root.Core.Utilities.log)
+local functions = requireNode(root.Core.Utilities.functions)
+
+local Prim = root.Primitives
+local WindowFrame = requireNode(Prim.WindowFrame)
+local Page = requireNode(Prim.Page)
+local DragBar = requireNode(Prim.DragBar)
+local IconButton = requireNode(Prim.IconButton)
+local ButtonBase = requireNode(Prim.ButtonBase)
+local Stack = requireNode(Prim.Stack)
+local Panel = requireNode(Prim.Panel)
+local Icon = requireNode(Prim.Icon)
+local SearchBar = requireNode(Prim.SearchBar)
+local CollapsedFace = requireNode(Prim.CollapsedFace)
+local Switch = requireNode(Prim.Switch)
+local ProgressBar = requireNode(Prim.ProgressBar)
+local Paragraph = requireNode(Prim.Paragraph)
+local Heading = requireNode(Prim.Heading)
+local Caption = requireNode(Prim.Caption)
+local Pill = requireNode(Prim.Pill)
+local Dialog = requireNode(Prim.Dialog)
+local Toast = requireNode(Prim.Toast)
+local Label = requireNode(Prim.Label)
+
+local Players = game:GetService('Players')
+local MarketplaceService = game:GetService('MarketplaceService')
+local ContentProvider = game:GetService('ContentProvider')
+local HttpService = game:GetService('HttpService')
+local Debris = game:GetService('Debris')
+local LocalPlayer = Players.LocalPlayer
+local UIS = variables.userInputService
+
+local AssetTypes = {
+	[1] = 'Image', [2] = 'T-Shirt', [3] = 'Audio', [4] = 'Mesh', [5] = 'Lua',
+	[8] = 'Hat', [9] = 'Place', [10] = 'Model', [11] = 'Shirt', [12] = 'Pants',
+	[13] = 'Decal', [17] = 'Head', [18] = 'Face', [19] = 'Gear', [21] = 'Badge',
+	[24] = 'Animation', [38] = 'Plugin', [40] = 'MeshPart', [61] = 'Emote', [62] = 'Video',
+}
+
+local ExtensionMap = {
+	[1] = '.png', [2] = '.png', [3] = '.mp3', [11] = '.png',
+	[12] = '.png', [13] = '.png', [62] = '.mp4', Default = '.rbxm',
+}
+
+local ModelTypes = {[10] = true, [4] = true, [8] = true, [19] = true, [40] = true, [61] = true}
+
+local TagColors = {
+	Audio = Color3.fromRGB(40, 190, 100), Video = Color3.fromRGB(150, 90, 230),
+	Image = Color3.fromRGB(0, 130, 230), Decal = Color3.fromRGB(0, 130, 230),
+	Animation = Color3.fromRGB(235, 140, 30), Model = Color3.fromRGB(230, 90, 60),
+}
+
+registry.search = function(query)
+	local assetId = tonumber(query) or tonumber(string.match(tostring(query), '%d+'))
+	local results = {Success = false, Info = nil, Status = 'Error | Invalid ID'}
+	if assetId then
+		local ok, info = pcall(function() return MarketplaceService:GetProductInfo(assetId) end)
+		if ok and info then
+			local typeName = AssetTypes[info.AssetTypeId] or ('Type ID: ' .. tostring(info.AssetTypeId))
+			results.Success = true
+			results.Info = {
+				Id = assetId,
+				Name = info.Name,
+				AssetType = info.AssetTypeId,
+				TypeName = typeName,
+				Creator = (info.Creator and info.Creator.Name) or 'Unknown',
+			}
+			results.Status = string.format('Found %s | %s', typeName, info.Name)
+		else
+			results.Status = 'Roblox Error | ID Not Found or Private'
+		end
+	end
+	registry.LastSearch = results
+	return results
+end
+
+local function esc(text)
+	return (tostring(text):gsub('&', '&amp;'):gsub('<', '&lt;'):gsub('>', '&gt;'))
+end
+
+local function formatTime(seconds)
+	seconds = seconds or 0
+	return string.format('%02d:%02d', math.floor(seconds / 60), math.floor(seconds % 60))
+end
+
+local themeManager = ThemeManager.new({theme = THEME, label = 'Asset Viewer'})
+local renderer = Renderer.new({themeManager = themeManager})
+
+local layout = table.clone(layouts.top)
+layout.chromeHeight = layout.topbarHeight + 44 
+
+local function fitSize()
+	local cam = workspace.CurrentCamera
+	local viewport = cam and cam.ViewportSize
+	local base = windowSizing.fit(viewport, 'top')
+	if not viewport or viewport.Y < 200 then return base end
+	local height = math.min(base.Y.Offset + 90, math.floor(viewport.Y * 0.92) - 20)
+	return UDim2.fromOffset(base.X.Offset, math.max(height, base.Y.Offset))
+end
+local W = {}
+W.__index = W
+
+local window = setmetatable({
+	name = 'Asset Viewer',
+	subheading = 'Preview, spawn and download',
+	icon = 'image',
+	layout = layout,
+	size = fitSize(),
+	showName = 'Asset Viewer',
+	showIcon = 'image',
+	showIconOnly = false,
+	themeManager = themeManager,
+	renderer = renderer,
+	theme = themeManager.theme,
+	instances = renderer.instances,
+	connections = renderer.connections,
+	hidden = true,
+	animating = false,
+	unloaded = false,
+	settings = {keepOnScreen = true},
+}, W)
+
+renderer.interactive = function() return window:_interactive() end
+
+function W:_interactive() return not self.animating and not self.hidden end
+
+WindowFrame.shell(renderer, window)
+WindowFrame.chrome(renderer, window)
+WindowFrame.actionBar(renderer, window)
+
+local bar = {window = window}
+DragBar.build(renderer, bar)
+window.dragBar = bar
+CollapsedFace.build(renderer, window)
+
+Haptic.setContainer(window.screenGui)
+Haptic.setEnabled(true)
+
+local function reveal(instance, goals, animate, info)
+	if not instance then return end
+	if animate then
+		Animator.play(instance, if typeof(info) == 'TweenInfo' then info else Animator.presets.Expo_0_4, goals)
+	else
+		for property, value in goals do instance[property] = value end
+	end
+end
+
+function W:_revealCommon(el, animate)
+	local theme = self.theme
+	reveal(el.stroke, {Transparency = theme.ElementStrokeTransparency}, animate)
+	reveal(el.title, {TextTransparency = 0}, animate)
+	reveal(el.main, {BackgroundTransparency = theme.ElementTransparency or 0}, animate)
+	if el.iconLabel then reveal(el.iconLabel, {ImageTransparency = 0}, animate) end
+	if el.descriptor then reveal(el.descriptor.titleLabel, {TextTransparency = 0.7}, animate) end
+end
+
+function W:_hideCommon(el, animate)
+	reveal(el.stroke, {Transparency = 1}, animate)
+	reveal(el.title, {TextTransparency = 1}, animate)
+	reveal(el.main, {BackgroundTransparency = 1}, animate)
+	if el.iconLabel then reveal(el.iconLabel, {ImageTransparency = 1}, animate) end
+	if el.descriptor then reveal(el.descriptor.titleLabel, {TextTransparency = 1}, animate) end
+end
+
+function W:_fadeSurfaces(shown, info)
+	local goals = {
+		[self.windowShadow] = {Transparency = if shown then 0.6 else 1},
+		[self.windowStroke] = {Transparency = if shown then 0.95 else 1},
+		[self.bottomFade] = {BackgroundTransparency = if shown then 0 else 1},
+	}
+	for instance, props in goals do
+		if info then
+			Animator.play(instance, info, props)
+		else
+			for property, value in props do instance[property] = value end
+		end
+	end
+end
+
+local page = {window = window, name = 'Asset Viewer', customOrder = 0, elements = {}}
+Page.build(renderer, page, window.elements)
+window.selectedTab = page
+
+SearchBar.build(renderer, window)
+renderer:DestroySubtree(window.searchPage) 
+renderer:DestroySubtree(window.searchEmpty)
+window.searchPage, window.searchEmpty = nil, nil
+window.elementsLayout:JumpTo(page.tabPage)
+
+do
+	local SB = Styles.Search
+	window.searchPill.Visible = true
+	window.searchInput.PlaceholderText = 'Enter a Roblox asset ID'
+	window.searchInput.Size = UDim2.new(1, -90, 0, 18)
+	window.searchGo = Icon.create(renderer, {
+		image = 'arrow-right', anchor = Vector2.new(1, 0.5), position = UDim2.new(1, -16, 0.5, 0),
+		size = UDim2.fromOffset(16, 16), zIndex = SB.bar.zIndex, parent = window.searchPill,
+	})
+	local goButton = renderer:Create('TextButton', {
+		Text = '', BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0),
+		Size = UDim2.fromOffset(40, 30), ZIndex = SB.bar.zIndex + 1, Parent = window.searchPill,
+	})
+	renderer:Connect(goButton.MouseButton1Click, function()
+		if window:_interactive() then task.spawn(function() window:Search() end) end
+	end)
+	renderer:Connect(window.searchInput.Focused, function()
+		Animator.play(window.searchStroke, Animator.presets.Quint_0_25, {Transparency = 0.5})
+	end)
+	renderer:Connect(window.searchInput.FocusLost, function(enterPressed)
+		Animator.play(window.searchStroke, Animator.presets.Quint_0_25, {Transparency = SB.shown.stroke})
+		if window:_interactive() then task.spawn(function() window:Search() end) end
+	end)
+end
+
+function W:_fadeSearch(shown, info)
+	SearchBar.fade(self, shown, info)
+	Animator.play(self.searchGo, info, {ImageTransparency = if shown then Styles.Search.shown.icon else 1})
+end
+
+local function guarded(el, fn, ...)
+	if not fn then return end
+	local args = table.pack(...)
+	task.spawn(function()
+		local ok, err = pcall(fn, table.unpack(args, 1, args.n))
+		if not ok then
+			log.warn("Asset Viewer: callback for '" .. tostring(el and el.name) .. "' errored:")
+			log.print(err)
+			window:Toast({title = 'Something went wrong', subtitle = tostring(err):sub(1, 60), icon = 'x'})
+		end
+	end)
+end
+
+local function add(parent, el)
+	table.insert(parent.elements, el)
+	local order = #parent.elements * 10
+	el.main.LayoutOrder = order
+	if el.descriptor then el.descriptor.main.LayoutOrder = order + 1 end
+	if parent.compact and parent.direction then
+		Stack.wrapChild(parent, el)
+		Stack.reflow(parent)
+	end
+	if not window.hidden then el:_setShown(true, true) end
+	return el
+end
+
+local function Descriptor_(parent, text)
+	local d = {tab = parent, window = window, description = text, __type = 'Descriptor'}
+	Caption.build(renderer, d)
+	return d
+end
+
+local function Heading_(parent, name, icon)
+	local el = {tab = parent, window = window, name = name, icon = icon, __type = 'Section'}
+	Heading.build(renderer, el)
+	function el:_setShown(shown, animate)
+		reveal(self.title, {TextTransparency = if shown then Styles.Section.title.shownTransparency else 1}, animate)
+		if self.iconLabel then
+			reveal(self.iconLabel, {ImageTransparency = if shown then Styles.Section.icon.shownTransparency else 1}, animate)
+		end
+	end
+	return add(parent, el)
+end
+
+local function Button_(parent, o)
+	local el = {
+		tab = parent, window = window, name = o.name, icon = o.icon, description = o.description,
+		compact = parent.compact or false, callback = o.callback, __type = 'Button',
+	}
+	local function press() guarded(el, el.callback) end
+	if el.compact then
+		ButtonBase.buildCompact(renderer, el, press)
+	else
+		ButtonBase.buildFull(renderer, el, press)
+	end
+	if el.description and not el.compact then el.descriptor = Descriptor_(parent, el.description) end
+	function el:_setShown(shown, animate)
+		if shown then window:_revealCommon(self, animate) else window:_hideCommon(self, animate) end
+	end
+	function el:_minWidth()
+		local width = 32
+		if self.icon then width += 22 end
+		return width + functions.textWidth(window.theme.Font, 16, locale.resolve(self.name))
+	end
+	function el:SetText(text)
+		self.name = text
+		self.title.Text = text
+	end
+	function el:SetIcon(icon)
+		self.icon = icon
+		if self.iconLabel then renderer.assign(self.iconLabel, 'Image', icon) end
+	end
+	function el:SetVisible(visible) self.main.Visible = visible end
+	return add(parent, el)
+end
+
+local function Group_(parent)
+	local el = {tab = parent, window = window, direction = Enum.FillDirection.Horizontal, compact = true, elements = {}, __type = 'Group'}
+	Stack.build(renderer, el, parent.direction == Enum.FillDirection.Horizontal)
+	function el:_setShown(shown, animate)
+		for _, child in self.elements do child:_setShown(shown, animate) end
+	end
+	table.insert(parent.elements, el)
+	el.main.LayoutOrder = #parent.elements * 10
+	return el
+end
+
+local function Text_(parent, o)
+	local el = {tab = parent, window = window, name = o.name or '', text = o.text or '', icon = o.icon, __type = 'Text'}
+	Paragraph.build(renderer, el)
+	function el:_setShown(shown, animate)
+		if shown then window:_revealCommon(self, animate) else window:_hideCommon(self, animate) end
+		reveal(self.body, {TextTransparency = if shown then Styles.Paragraph.body.shownTransparency else 1}, animate)
+	end
+	function el:Set(text) Paragraph.setText(renderer, self, text) end
+	function el:SetTitle(name) Paragraph.setTitle(renderer, self, name) end
+	return add(parent, el)
+end
+
+local function Toggle_(parent, o)
+	local T = Styles.Toggle
+	local el = {
+		tab = parent, window = window, name = o.name, icon = o.icon, description = o.description,
+		value = o.value == true, callback = o.callback, __type = 'Toggle',
+	}
+	local function perform()
+		el.value = not el.value
+		Switch.animate(renderer, el)
+		guarded(el, el.callback, el.value)
+	end
+	ButtonBase.buildFull(renderer, el, perform, {
+		style = T.full,
+		press = T.press,
+		control = function()
+			Switch.build(renderer, el, el.main, function(...) return renderer:CreateGlow(...) end)
+			el.functionContainer.Position = T.full.switchPosition
+			el.functionContainer.AnchorPoint = T.full.switchAnchor
+		end,
+	})
+	if el.description then el.descriptor = Descriptor_(parent, el.description) end
+	function el:_setShown(shown, animate)
+		if shown then window:_revealCommon(self, animate) else window:_hideCommon(self, animate) end
+		Switch.setShown(function(instance, goals, a, tween) reveal(instance, goals, a, tween) end, renderer, self, shown, animate)
+	end
+	return add(parent, el)
+end
+
+local function Progress_(parent, o)
+	local P = Styles.Progress
+	local el = {
+		tab = parent, window = window, name = o.name, icon = o.icon, min = 0, max = 1, value = 0,
+		showValue = o.showValue ~= false, indeterminate = false, text = o.text, __type = 'Progress',
+	}
+	function el:_clamp(v) return math.clamp(tonumber(v) or self.min, self.min, self.max) end
+	function el:_ratio()
+		local span = self.max - self.min
+		if span <= 0 then return 0 end
+		return (self.value - self.min) / span
+	end
+	function el:_readout()
+		if self.text then return locale.resolve(self.text) end
+		return string.format('%d%%', math.round(self:_ratio() * 100))
+	end
+	ProgressBar.build(renderer, el, function(...) return renderer:CreateGlow(...) end)
+	function el:_setShown(shown, animate)
+		self._shown = shown
+		reveal(self.readout, {TextTransparency = if shown then P.readout.shownTransparency else 1}, animate)
+		if shown then window:_revealCommon(self, animate) else window:_hideCommon(self, animate) end
+		reveal(self.track, {BackgroundTransparency = if shown then 0 else 1}, animate)
+		reveal(self.fill, {BackgroundTransparency = if shown then 0 else 1}, animate)
+		reveal(self.fillGlow, {Transparency = if shown then window.theme.AccentGlow else 1}, animate)
+	end
+	function el:Set(value)
+		self.value = self:_clamp(value)
+		if self.indeterminate then
+			self.indeterminate = false
+			ProgressBar.stopSweep(self)
+		end
+		ProgressBar.render(self, true)
+	end
+	function el:SetRange(min, max)
+		self.min, self.max = min, math.max(max, min)
+		self.value = self:_clamp(self.value)
+	end
+	function el:SetText(text)
+		self.text = text
+		ProgressBar.refreshReadout(self)
+	end
+	function el:SetTitle(text)
+		self.name = text
+		self.title.Text = text
+	end
+	function el:SetIndeterminate(on)
+		on = on == true
+		if on == self.indeterminate then return end
+		self.indeterminate = on
+		if on then
+			ProgressBar.startSweep(self)
+		else
+			ProgressBar.stopSweep(self)
+			ProgressBar.render(self, false)
+		end
+	end
+	return add(parent, el)
+end
+
+function W:Toast(o)
+	if self.unloaded then return end
+	o = if typeof(o) == 'table' then o else {}
+	local t = {
+		window = self, title = o.title or '', subtitle = o.subtitle, icon = o.icon, minWidth = o.minWidth,
+		subtitleAbove = false, position = 'Top', isAvatar = false, _hovered = false, _dismissed = false,
+	}
+	t.duration = o.duration or math.clamp(#(t.title .. (t.subtitle or '')) * 0.06 + 3, 3, 9)
+	t.hasIcon = t.icon ~= nil and t.icon ~= 0 and t.icon ~= ''
+	t._iconImage = if t.hasIcon then (if type(t.icon) == 'number' then 'rbxassetid://' .. t.icon else t.icon) else nil
+
+	if not self._toastsTop then self._toastsTop = WindowFrame.toasts(renderer, self, true) end
+	Toast.build(renderer, t, self._toastsTop)
+
+	self._toastCount = (self._toastCount or 0) + 1
+	t.main.LayoutOrder = -self._toastCount
+	self._liveToasts = self._liveToasts or {}
+	t._live = self._liveToasts
+	table.insert(t._live, t)
+	while #t._live > Styles.Toast.maxLive do
+		local oldest = table.remove(t._live, 1)
+		if oldest and oldest ~= t then task.spawn(oldest._dismiss, oldest) end
+	end
+
+	function t:_measure() return Toast.measure(renderer, self) end
+	function t:_show() Toast.show(renderer, self) end
+	function t:_dismiss() Toast.dismiss(renderer, self, self._live) end
+	Toast.start(renderer, t)
+	return t
+end
+
+local popupStack = {}
+
+function W:Popup(o)
+	if self.unloaded then return end
+	o = if typeof(o) == 'table' then o else {}
+	local p = {
+		window = self, title = o.title or 'Popup', subtitle = o.subtitle, content = o.content, icon = o.icon,
+		options = o.options or {{text = 'Okay'}}, dismissable = o.dismissable ~= false,
+		_reveal = {}, _connections = {}, _closed = false,
+	}
+	function p:_activate(callback, text)
+		if callback then
+			task.spawn(function()
+				local ok, err = pcall(callback)
+				if not ok then
+					log.warn("Asset Viewer: popup button '" .. tostring(text) .. "' errored:")
+					log.print(err)
+				end
+			end)
+		end
+		self:Close()
+	end
+	function p:Close()
+		if self._closed then return end
+		self._closed = true
+		local index = table.find(popupStack, self)
+		if index then table.remove(popupStack, index) end
+		for _, connection in self._connections do renderer:Disconnect(connection) end
+		self._connections = {}
+		Dialog.hide(renderer, self)
+	end
+
+	Dialog.build(renderer, p)
+	table.insert(popupStack, p)
+	if p.dismissable then
+		table.insert(p._connections, renderer:Connect(p.backdrop.InputBegan, function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				p:Close()
+			end
+		end))
+		table.insert(p._connections, renderer:Connect(UIS.InputBegan, function(input, processed)
+			if not processed and input.KeyCode == Enum.KeyCode.Escape and popupStack[#popupStack] == p then p:Close() end
+		end))
+	end
+	task.spawn(function() Dialog.show(p) end)
+	return p
+end
+
+local currentId, currentInfo = '', nil
+local mediaKind = nil 
+local spawned = {}
+local autoRemove = true
+local contextAction = nil
+local currentTrack = nil
+local tag = nil
+local searchToken = 0
+
+local audio = renderer:Create('Sound', {Parent = window.main})
+
+local activity = Progress_(page, {name = 'Working...', showValue = false})
+activity.main.Visible = false
+
+local preview = {tab = page, window = window, __type = 'Preview'}
+preview.main = renderer:Create('Frame', {
+	Name = 'Preview', Size = UDim2.new(1, -20, 0, 230), BorderSizePixel = 0,
+	BackgroundColor3 = Styles.Element.base, BackgroundTransparency = 1, Parent = page.tabPage,
+}, {BackgroundTransparency = 'ElementTransparency'})
+preview.stroke = Panel.styleBody(renderer, preview.main)
+preview.holder = renderer:Create('Frame', {
+	Name = 'Holder', BackgroundTransparency = 1, Size = UDim2.new(1, -24, 1, -24),
+	Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5), ClipsDescendants = true,
+	Parent = preview.main,
+})
+renderer:Create('UICorner', {CornerRadius = UDim.new(0, 10), Parent = preview.holder})
+preview.empty = Label.create(renderer, {
+	text = locale.t('Search for an asset to preview it'), size = UDim2.fromScale(1, 1), autoSize = false,
+	align = Enum.TextXAlignment.Center, alignY = Enum.TextYAlignment.Center, textSize = 15, wrapped = true,
+	zIndex = 1, parent = preview.holder,
+})
+preview.image = renderer:Create('ImageLabel', {
+	Name = 'Image', BackgroundTransparency = 1, ImageTransparency = 1, Size = UDim2.fromScale(1, 1),
+	ScaleType = Enum.ScaleType.Fit, ZIndex = 2, Parent = preview.holder,
+})
+preview.video = renderer:Create('VideoFrame', {
+	Name = 'Video', BackgroundTransparency = 1, Size = UDim2.fromScale(1, 1), Visible = false, ZIndex = 3,
+	Parent = preview.holder,
+})
+local videoAspect = renderer:Create('UIAspectRatioConstraint', {
+	DominantAxis = Enum.DominantAxis.Width, AspectType = Enum.AspectType.FitWithinMaxSize, Parent = preview.video,
+})
+function preview:_setShown(shown, animate)
+	reveal(self.main, {BackgroundTransparency = if shown then window.theme.ElementTransparency or 0 else 1}, animate)
+	reveal(self.stroke, {Transparency = if shown then window.theme.ElementStrokeTransparency else 1}, animate)
+	reveal(self.empty, {TextTransparency = if shown then 0.55 else 1}, animate)
+end
+add(page, preview)
+
+local info = Text_(page, {name = 'Status', icon = 'info', text = 'Awaiting search...'})
+
+local playback = Progress_(page, {name = 'Playback', icon = 'play', text = '00:00 / 00:00'})
+playback.main.Visible = false
+
+local mediaRow = Group_(page)
+local playBtn = Button_(mediaRow, {name = 'Play', icon = 'play', callback = function() window:ToggleMedia() end})
+local stopBtn = Button_(mediaRow, {name = 'Stop', icon = 'square', callback = function() window:StopMedia() end})
+mediaRow.main.Visible = false
+
+local contextRow = Group_(page)
+local contextBtn = Button_(contextRow, {name = 'Spawn', icon = 'box', callback = function()
+	if contextAction then contextAction() end
+end})
+local deleteBtn = Button_(contextRow, {name = 'Delete Spawned', icon = 'trash-2', callback = function()
+	window:ClearSpawned(true)
+end})
+contextRow.main.Visible = false
+
+Heading_(page, 'Actions', 'download')
+local actionRow = Group_(page)
+local copyBtn = Button_(actionRow, {name = 'Copy ID', icon = 'copy', callback = function()
+	if currentId == '' then
+		window:Toast({title = 'Nothing to copy', subtitle = 'Search for an asset first', icon = 'x'})
+		return
+	end
+	local clip = setclipboard or toclipboard
+	if not clip then
+		window:Toast({title = 'No clipboard support', subtitle = 'Your executor lacks setclipboard', icon = 'x'})
+		return
+	end
+	clip(currentId)
+	window:Toast({title = 'Copied ID', subtitle = currentId, icon = 'check'})
+end})
+local saveBtn = Button_(actionRow, {name = 'Download', icon = 'download', callback = function()
+	window:Download()
+end})
+
+Toggle_(page, {
+	name = 'Auto-remove spawns', icon = 'timer', value = true,
+	description = 'Spawned previews are removed after ' .. SPAWN_LIFETIME .. ' seconds.',
+	callback = function(value) autoRemove = value end,
+})
+
+Heading_(page, 'Notes', 'triangle-alert')
+Text_(page, {
+	name = '',
+	text = '\u{2022} Always use this script on an alt account\n'
+		.. '\u{2022} Downloading depends entirely on your executor's capabilities\n'
+		.. '\u{2022} Assets download more reliably when accessed within the game that uses them.\n'
+		.. '\u{2022} Mobile executors work best',
+})
+
+local function makeAction(name, icon, order, callback)
+	local action = {window = window, name = name, icon = icon}
+	IconButton.build(renderer, action, {name = name, icon = icon, parent = window.actionContainer, order = order})
+	IconButton.wire(renderer, action, {
+		canHover = function() return window:_interactive() end,
+		onClick = function() task.spawn(callback) end,
+		onLeave = function()
+			if window:_interactive() then IconButton.fade(action, 'rest') end
+		end,
+	})
+	return action
+end
+
+local closeAction = makeAction('Close', Styles.Icons.close, 1, function()
+	if window.unloaded then return end
+	window:Popup({
+		title = 'Close Asset Viewer?',
+		subtitle = 'This destroys the window',
+		content = 'Any previews you spawned into the world will be removed too.',
+		icon = 'x',
+		options = {
+			{text = 'Cancel'},
+			{text = 'Destroy', style = 'danger', callback = function() window:Close() end},
+		},
+	})
+end)
+local minimiseAction = makeAction('Collapse', Styles.Icons.minimise, 2, function() window:ToggleHide() end)
+
+local function setTag(typeName)
+	if not typeName then
+		if tag then Pill.setShown(tag, false, true) end
+		return
+	end
+	local color = TagColors[typeName] or Styles.Tag.defaultColor
+	if not tag then
+		tag = {window = window}
+		Pill.build(renderer, tag, {name = 'Tag', parent = window.tagContainer, order = 0, color = color, text = typeName})
+		window.tagContainer.Visible = true
+	else
+		Pill.setColor(tag, color)
+		Pill.setText(tag, typeName)
+	end
+	Pill.setShown(tag, true, true)
+end
+
+local function setBusy(on, text)
+	if on then
+		activity:SetTitle(text or 'Working...')
+		activity.main.Visible = true
+		activity:SetIndeterminate(true)
+	else
+		activity:SetIndeterminate(false)
+		activity.main.Visible = false
+	end
+end
+
+local function setMediaControls(on)
+	mediaRow.main.Visible = on
+	playback.main.Visible = on
+	if not on then
+		playBtn:SetText('Play')
+		playBtn:SetIcon('play')
+	end
+end
+
+local function setContext(label, icon)
+	contextBtn.main.Visible = label ~= nil
+	if label then
+		contextBtn:SetText(label)
+		contextBtn:SetIcon(icon or 'box')
+	end
+	local alive = false
+	for _, object in spawned do
+		if object and object.Parent then alive = true break end
+	end
+	deleteBtn.main.Visible = alive
+	contextRow.main.Visible = label ~= nil or alive
+end
+
+local function stopTrack()
+	if currentTrack then
+		pcall(function() currentTrack:Stop() end)
+		currentTrack = nil
+	end
+end
+
+function W:StopMedia()
+	pcall(function() audio:Stop() end)
+	audio.TimePosition = 0
+	preview.video.Playing = false
+	preview.video.TimePosition = 0
+	playBtn:SetText('Play')
+	playBtn:SetIcon('play')
+end
+
+function W:ToggleMedia()
+	if mediaKind == 'video' then
+		if preview.video.Playing then
+			preview.video.Playing = false
+			playBtn:SetText('Play')
+			playBtn:SetIcon('play')
+		else
+			preview.video.Playing = true
+			playBtn:SetText('Pause')
+			playBtn:SetIcon('pause')
+		end
+	elseif mediaKind == 'audio' then
+		if audio.Playing then
+			audio:Pause()
+			playBtn:SetText('Play')
+			playBtn:SetIcon('play')
+		else
+			if audio.IsPaused then audio:Resume() else audio:Play() end
+			playBtn:SetText('Pause')
+			playBtn:SetIcon('pause')
+		end
+	end
+end
+
+renderer:Connect(audio.Ended, function()
+	playBtn:SetText('Play')
+	playBtn:SetIcon('play')
+end)
+renderer:Connect(preview.video.Ended, function()
+	playBtn:SetText('Play')
+	playBtn:SetIcon('play')
+	preview.video.TimePosition = 0
+end)
+
+do 
+	local acc = 0
+	renderer:Connect(variables.runService.Heartbeat, function(dt)
+		acc += dt
+		if acc < 0.1 then return end
+		acc = 0
+		if not mediaKind or window.hidden or window.unloaded then return end
+		local player = if mediaKind == 'video' then preview.video else audio
+		local position, length = player.TimePosition or 0, player.TimeLength or 0
+		if length <= 0 then
+			playback:SetText('Loading...')
+			return
+		end
+		playback:SetRange(0, length)
+		playback.text = formatTime(position) .. ' / ' .. formatTime(length)
+		playback:Set(position)
+	end)
+end
+
+function W:ClearSpawned(notify)
+	local count = 0
+	for _, object in spawned do
+		if object and object.Parent then
+			count += 1
+			pcall(function() object:Destroy() end)
+		end
+	end
+	spawned = {}
+	deleteBtn.main.Visible = false
+	contextRow.main.Visible = contextBtn.main.Visible
+	if notify then
+		window:Toast({title = if count > 0 then 'Removed spawned objects' else 'Nothing to remove', icon = 'trash-2'})
+	end
+end
+
+local function track(object)
+	table.insert(spawned, object)
+	if autoRemove then Debris:AddItem(object, SPAWN_LIFETIME) end
+	deleteBtn.main.Visible = true
+	contextRow.main.Visible = true
+end
+
+local function spawnCFrame()
+	local char = LocalPlayer and LocalPlayer.Character
+	local hrp = char and char:FindFirstChild('HumanoidRootPart')
+	if not hrp then
+		window:Toast({title = 'No character found', subtitle = 'Respawn and try again', icon = 'x'})
+		return nil
+	end
+	return hrp.CFrame * CFrame.new(0, 0, -5), char
+end
+
+local function contextFor(assetType)
+	if assetType == 24 then
+		return 'Play Animation', 'play', function()
+			local cf, char = spawnCFrame()
+			if not cf then return end
+			if currentTrack then
+				stopTrack()
+				contextBtn:SetText('Play Animation')
+				contextBtn:SetIcon('play')
+				return
+			end
+			local humanoid = char:FindFirstChildOfClass('Humanoid')
+			if not humanoid then
+				window:Toast({title = 'No humanoid found', icon = 'x'})
+				return
+			end
+			local animator = humanoid:FindFirstChildOfClass('Animator')
+			if not animator then
+				animator = Instance.new('Animator')
+				animator.Parent = humanoid
+			end
+			local anim = Instance.new('Animation')
+			anim.AnimationId = 'rbxassetid://' .. currentId
+			local ok, loaded = pcall(function() return animator:LoadAnimation(anim) end)
+			if not ok or not loaded then
+				window:Toast({title = 'Could not load animation', subtitle = 'It may be restricted', icon = 'x'})
+				return
+			end
+			loaded:Play()
+			currentTrack = loaded
+			contextBtn:SetText('Stop Animation')
+			contextBtn:SetIcon('square')
+		end
+	elseif assetType == 2 or assetType == 11 or assetType == 12 then
+		return 'Spawn Avatar Preview', 'user', function()
+			local cf = spawnCFrame()
+			if not cf then return end
+			local desc = Instance.new('HumanoidDescription')
+			if assetType == 2 then desc.GraphicTShirt = tonumber(currentId)
+			elseif assetType == 11 then desc.Shirt = tonumber(currentId)
+			else desc.Pants = tonumber(currentId) end
+			local ok, dummy = pcall(function()
+				return Players:CreateHumanoidModelFromDescription(desc, Enum.HumanoidRigType.R15)
+			end)
+			if not ok or not dummy then
+				window:Toast({title = 'Failed to load preview', icon = 'x'})
+				return
+			end
+			for _, part in dummy:GetDescendants() do
+				if part:IsA('BasePart') then part.Color = Color3.fromRGB(163, 162, 165) end
+			end
+			dummy:PivotTo(cf * CFrame.Angles(0, math.pi, 0))
+			dummy.Parent = workspace
+			track(dummy)
+			window:Toast({title = 'Spawned avatar preview', icon = 'check'})
+		end
+	elseif assetType == 1 then
+		return 'Spawn Preview Part', 'image', function()
+			local cf = spawnCFrame()
+			if not cf then return end
+			local part = Instance.new('Part')
+			part.Size = Vector3.new(4, 4, 1)
+			part.CFrame = cf
+			part.Anchored = true
+			part.CanCollide = false
+			part.Parent = workspace
+			local decal = Instance.new('Decal')
+			decal.Face = Enum.NormalId.Front
+			decal.Texture = 'rbxassetid://' .. currentId
+			decal.Parent = part
+			track(part)
+			window:Toast({title = 'Spawned preview part', icon = 'check'})
+		end
+	elseif ModelTypes[assetType] then
+		return 'Spawn Model', 'box', function()
+			local cf = spawnCFrame()
+			if not cf then return end
+			local ok, objects = pcall(function() return game:GetObjects('rbxassetid://' .. currentId) end)
+			if not ok or not objects then
+				window:Toast({title = 'Failed / restricted', subtitle = 'This asset cannot be loaded', icon = 'x'})
+				return
+			end
+			for _, object in objects do
+				if object:IsA('Model') then
+					object:MoveTo(cf.Position)
+				elseif object:IsA('BasePart') then
+					object.CFrame = cf
+				end
+				object.Parent = workspace
+				track(object)
+			end
+			window:Toast({title = 'Spawned model', icon = 'check'})
+		end
+	end
+	return nil
+end
+
+function W:Search()
+	local query = self.searchInput.Text
+	if query == '' then return end
+
+	searchToken += 1
+	local token = searchToken
+
+	self:StopMedia()
+	stopTrack()
+	mediaKind = nil
+	contextAction = nil
+	setMediaControls(false)
+	setContext(nil)
+	preview.video.Visible = false
+	preview.image.Visible = true
+	preview.image.ImageTransparency = 1
+	preview.empty.Visible = true
+	info:SetTitle('Status')
+	info:Set('Searching...')
+	setBusy(true, 'Searching...')
+
+	task.spawn(function()
+		local data = registry.search(query)
+		if token ~= searchToken or window.unloaded then return end
+
+		if not data.Success then
+			info:SetTitle('Status')
+			info:Set(esc(data.Status))
+			currentId, currentInfo = '', nil
+			saveBtn:SetText('Download')
+			setTag(nil)
+			setBusy(false)
+			return
+		end
+
+		local assetInfo = data.Info
+		currentId = tostring(assetInfo.Id)
+		currentInfo = assetInfo
+		local assetType = assetInfo.AssetType
+		local typeName = AssetTypes[assetType] or 'Asset'
+
+		info:SetTitle(esc(assetInfo.Name))
+		info:Set(string.format('<b>Type</b>  %s\n<b>Creator</b>  %s\n<b>ID</b>  %s', esc(assetInfo.TypeName), esc(assetInfo.Creator), currentId))
+		saveBtn:SetText('Download ' .. typeName)
+		setTag(typeName)
+
+		renderer.assign(preview.image, 'Image', 'rbxthumb://type=Asset&id=' .. currentId .. '&w=420&h=420')
+		pcall(function() ContentProvider:PreloadAsync({preview.image}) end)
+		if token ~= searchToken or window.unloaded then return end
+		preview.empty.Visible = false
+		Animator.play(preview.image, Animator.presets.Quint_0_4, {ImageTransparency = 0})
+
+		if assetType == 3 then
+			mediaKind = 'audio'
+			audio.SoundId = 'rbxassetid://' .. currentId
+			setMediaControls(true)
+		elseif assetType == 62 then
+			mediaKind = 'video'
+			preview.video.Video = 'rbxassetid://' .. currentId
+			preview.video.Visible = true
+			preview.image.Visible = false
+			setMediaControls(true)
+			task.spawn(function()
+				local started = os.clock()
+				repeat task.wait() until preview.video.Resolution ~= Vector2.zero or os.clock() - started > 10 or token ~= searchToken
+				if preview.video.Resolution.Y > 0 then
+					videoAspect.AspectRatio = preview.video.Resolution.X / preview.video.Resolution.Y
+				end
+			end)
+		else
+			local label, icon, action = contextFor(assetType)
+			if label then
+				contextAction = action
+				setContext(label, icon)
+			end
+		end
+		setBusy(false)
+	end)
+end
+
+local function safeName(name)
+	local cleaned = (tostring(name):gsub('[^%w%s]', ''))
+	if cleaned == '' then cleaned = 'asset' end
+	return cleaned
+end
+
+local function ensureFolder()
+	pcall(function()
+		if isfolder and makefolder and not isfolder(SAVE_FOLDER) then makefolder(SAVE_FOLDER) end
+	end)
+end
+
+local function downloadAsImage()
+	if not currentInfo then return end
+	local id, name = currentId, currentInfo.Name
+	setBusy(true, 'Downloading image...')
+	task.spawn(function()
+		ensureFolder()
+		local thumbData
+		local url = 'https://thumbnails.roblox.com/v1/assets?assetIds=' .. id .. '&returnPolicy=PlaceHolder&size=420x420&format=Png&isCircular=false'
+		local ok, response = pcall(function() return game:HttpGet(url) end)
+		if ok and response then
+			local decodeOk, decoded = pcall(function() return HttpService:JSONDecode(response) end)
+			local imageUrl = decodeOk and decoded and decoded.data and decoded.data[1] and decoded.data[1].imageUrl
+			if imageUrl then
+				local imgOk, imgData = pcall(function() return game:HttpGet(imageUrl) end)
+				if imgOk then thumbData = imgData end
+			end
+		end
+		setBusy(false)
+		if thumbData and #thumbData > 100 then
+			local path = string.format('%s/%s_%s.png', SAVE_FOLDER, safeName(name), id)
+			local wrote = pcall(writefile, path, thumbData)
+			if wrote then
+				window:Toast({title = 'Saved to files', subtitle = path, icon = 'check'})
+				return
+			end
+		end
+		window:Toast({title = 'Download failed', subtitle = 'Could not save the image', icon = 'x'})
+	end)
+end
+
+function W:Download()
+	if currentId == '' or not currentInfo then
+		window:Toast({title = 'Nothing to download', subtitle = 'Search for an asset first', icon = 'x'})
+		return
+	end
+	if not writefile then
+		window:Toast({title = 'No writefile support', subtitle = 'Your executor cannot save files', icon = 'x'})
+		return
+	end
+
+	local assetType = currentInfo.AssetType
+	if assetType == 1 then
+		downloadAsImage()
+		return
+	end
+
+	local id, name = currentId, currentInfo.Name
+	setBusy(true, 'Downloading...')
+	task.spawn(function()
+		ensureFolder()
+		local ext = ExtensionMap[assetType] or ExtensionMap.Default
+		local ok, res = pcall(function() return game:HttpGet('https://assetdelivery.roblox.com/v1/asset/?id=' .. id) end)
+		setBusy(false)
+		if ok and type(res) == 'string' and #res > 500 then
+			local path = string.format('%s/%s_%s%s', SAVE_FOLDER, safeName(name), id, ext)
+			local wrote = pcall(writefile, path, res)
+			if wrote then
+				window:Toast({title = 'Saved to files', subtitle = path, icon = 'check'})
+			else
+				window:Toast({title = 'Download failed', subtitle = 'Could not write the file', icon = 'x'})
+			end
+			return
+		end
+		window:Popup({
+			title = 'Download denied',
+			subtitle = 'The raw asset could not be fetched',
+			content = 'This asset is probably private or protected. You can save its thumbnail image instead.',
+			icon = 'download',
+			options = {
+				{text = 'Cancel'},
+				{text = 'Download image', style = 'primary', callback = downloadAsImage},
+			},
+		})
+	end)
+end
+
+do
+	local dragging, grab = false, Vector2.zero
+	local style = Styles.DragBar
+
+	local function inset()
+		if window.screenGui.IgnoreGuiInset then return variables.guiService:GetGuiInset() end
+		return Vector2.zero
+	end
+
+	local function target()
+		local point = UIS:GetMouseLocation() + grab + inset()
+		local x, y = point.X, point.Y
+		if window.settings.keepOnScreen then
+			local mainSize, screenSize, margin = window.main.AbsoluteSize, window.screenGui.AbsoluteSize, style.screenMargin
+			local halfX, halfY = mainSize.X / 2, mainSize.Y / 2
+			x = math.clamp(x, halfX + margin, math.max(halfX + margin, screenSize.X - halfX - margin))
+			y = math.clamp(y, halfY + margin, math.max(halfY + margin, screenSize.Y - halfY - margin))
+		end
+		return UDim2.fromOffset(x, y), UDim2.fromOffset(x, y + window.main.Size.Y.Offset / 2 + style.gap)
+	end
+
+	local function isPress(input)
+		local name = input.UserInputType.Name
+		return name == 'MouseButton1' or name == 'Touch'
+	end
+
+	local function begin()
+		if not window:_interactive() then return end
+		dragging = true
+		grab = window.main.AbsolutePosition + window.main.AbsoluteSize * window.main.AnchorPoint - UIS:GetMouseLocation()
+		DragBar.press(bar)
+	end
+
+	local function finish()
+		if not dragging then return end
+		dragging = false
+		if window.unloaded or not window:_interactive() then return end
+		local mainPosition, barPosition = target()
+		DragBar.release(bar, mainPosition, barPosition)
+	end
+
+	local function overActions(position)
+		local at, size = window.actionContainer.AbsolutePosition, window.actionContainer.AbsoluteSize
+		return position.X >= at.X and position.X <= at.X + size.X and position.Y >= at.Y and position.Y <= at.Y + size.Y
+	end
+
+	renderer:Connect(window.topbar.InputBegan, function(input, processed)
+		if processed or not isPress(input) then return end
+		if overActions(input.Position) then return end
+		begin()
+	end)
+	renderer:Connect(bar.dragInteract.InputBegan, function(input, processed)
+		if processed or not isPress(input) then return end
+		begin()
+	end)
+	renderer:Connect(bar.dragInteract.MouseEnter, function()
+		if not dragging and not window.hidden then DragBar.hover(bar, true) end
+	end)
+	renderer:Connect(bar.dragInteract.MouseLeave, function()
+		if not dragging and not window.hidden then DragBar.hover(bar, false) end
+	end)
+	renderer:Connect(UIS.InputEnded, function(input)
+		if isPress(input) then finish() end
+	end)
+	renderer:Connect(UIS.WindowFocusReleased, finish)
+	renderer:Connect(variables.runService.RenderStepped, function(dt)
+		if not dragging then return end
+		if not window:_interactive() then
+			dragging = false
+			return
+		end
+		local mainPosition, barPosition = target()
+		DragBar.follow(bar, mainPosition, barPosition, dt)
+	end)
+end
+
+function W:_syncDragBar()
+	local position = self.main.Position
+	bar.drag.Position = UDim2.new(position.X.Scale, position.X.Offset, position.Y.Scale, position.Y.Offset + self.size.Y.Offset / 2 + Styles.DragBar.gap)
+end
+
+do
+	local acc = 0
+	renderer:Connect(variables.runService.Heartbeat, function(dt)
+		acc += dt
+		if acc < 0.5 or window.unloaded then return end
+		acc = 0
+		local newSize = fitSize()
+		if newSize ~= window.size then
+			window.size = newSize
+			if not (window.hidden or window.animating) then
+				window.main.Size = newSize
+				window:_syncDragBar()
+			end
+		end
+	end)
+end
+
+function W:_revealAll(step)
+	for index, el in ipairs(page.elements) do
+		el:_setShown(true, true)
+		if step and index <= 14 then task.wait(step) end
+	end
+end
+
+function W:_clampedPosition(position)
+	if not self.settings.keepOnScreen then return position end
+	if position.X.Scale ~= 0 or position.Y.Scale ~= 0 then return position end
+	local screen, halfX, halfY, margin = self.screenGui.AbsoluteSize, self.size.X.Offset / 2, self.size.Y.Offset / 2, 8
+	local x = math.clamp(position.X.Offset, halfX + margin, math.max(halfX + margin, screen.X - halfX - margin))
+	local y = math.clamp(position.Y.Offset, halfY + margin, math.max(halfY + margin, screen.Y - halfY - margin))
+	return UDim2.fromOffset(x, y)
+end
+
+local COLLAPSED_SIZE = UDim2.fromOffset(185, 50)
+local COLLAPSED_ICON_SIZE = UDim2.fromOffset(50, 50)
+local COLLAPSED_BASE = UDim2.new(0.5, 0, 0, 20)
+
+function W:_collapsedRect()
+	local size = if self.showIconOnly then COLLAPSED_ICON_SIZE else COLLAPSED_SIZE
+	if self._collapsedPosition then return self._collapsedPosition, size end
+	return UDim2.new(COLLAPSED_BASE.X.Scale, COLLAPSED_BASE.X.Offset, COLLAPSED_BASE.Y.Scale, COLLAPSED_BASE.Y.Offset + size.Y.Offset / 2), size
+end
+
+function W:_revealChrome(info)
+	if self.topbarIcon then Animator.play(self.topbarIcon, info, {ImageTransparency = 0}) end
+	if self.title then Animator.play(self.title, info, {TextTransparency = 0}) end
+	if self.subtitle then Animator.play(self.subtitle, info, {TextTransparency = 0.7}) end
+	IconButton.fade(closeAction, 'rest')
+	IconButton.fade(minimiseAction, 'rest')
+	if tag then Pill.setShown(tag, true, true) end
+end
+
+function W:Show()
+	if self.animating or not self.hidden then return end
+	self.animating = true
+	self.hidden = false
+	self.collapsedInteract.Visible = false
+	if self.hasShownOnce then
+		self:_restore()
+	else
+		self.hasShownOnce = true
+		self:_firstShow()
+	end
+end
+
+function W:_firstShow()
+	self.main.Visible = true
+	bar.drag.Visible = false
+
+	Animator.play(self.main, Animator.presets.ExpoInOut_1, {BackgroundTransparency = 0, Size = self.size})
+	task.wait(0.85)
+	if self.unloaded then return end
+	self:_fadeSurfaces(true, Animator.presets.Expo_0_6)
+	task.wait(0.3)
+	if self.unloaded then return end
+
+	self:_revealChrome(Animator.presets.Expo_0_4)
+	self:_fadeSearch(true, Animator.presets.Quint_0_4)
+	task.wait(0.2)
+
+	self:_revealAll(0.03)
+	task.wait(0.5)
+	if self.unloaded then return end
+
+	self:_syncDragBar()
+	bar.drag.Visible = true
+	Animator.play(bar.dragCosmetic, Animator.presets.Expo_0_6, {BackgroundTransparency = 0.7})
+	Animator.play(bar.dragCosmetic, Animator.presets.Expo_1, {Size = UDim2.fromOffset(100, 4)})
+	self.animating = false
+end
+
+function W:Hide()
+	if self.animating or self.hidden then return end
+	self.animating = true
+	self.hidden = true
+	self.collapsedInteract.Visible = false
+	self._restorePosition = self.main.Position
+
+	local position, size = self:_collapsedRect()
+	local fast, move, fade = Animator.presets.Quint_0_18, Animator.presets.ExpoInOut_0_35, Animator.presets.Quint_0_2
+
+	Animator.play(bar.dragCosmetic, fast, {Size = UDim2.fromOffset(0, 4), BackgroundTransparency = 1})
+	task.delay(0.18, function()
+		if self.hidden and not self.unloaded then bar.drag.Visible = false end
+	end)
+	self:_fadeSurfaces(false, fast)
+	self:_fadeSearch(false, fast)
+	if self.title then Animator.play(self.title, fast, {TextTransparency = 1}) end
+	if self.subtitle then Animator.play(self.subtitle, fast, {TextTransparency = 1}) end
+	if self.topbarIcon then Animator.play(self.topbarIcon, fast, {ImageTransparency = 1}) end
+	Animator.play(closeAction.iconLabel, fast, {ImageTransparency = 1})
+	Animator.play(minimiseAction.iconLabel, fast, {ImageTransparency = 1})
+	if tag then Pill.setShown(tag, false, true) end
+	for _, el in page.elements do el:_setShown(false, true) end
+
+	local tween = Animator.play(self.main, move, {Size = size, Position = position})
+	tween.Completed:Connect(function()
+		if self.unloaded or not self.hidden then return end
+		self.collapsedInteract.Visible = true
+		self.animating = false
+	end)
+	Animator.play(self.windowCorner, move, {CornerRadius = UDim.new(1, 0)})
+	task.delay(0.18, function()
+		if not self.hidden or self.unloaded then return end
+		self.topbar.Visible = false
+		self.elements.Visible = false
+		self.searchPill.Visible = false
+		CollapsedFace.setShown(self, true, fade)
+	end)
+end
+
+function W:_restore()
+	local position = self:_clampedPosition(self._restorePosition or UDim2.new(0.5, 0, 0.5, 0))
+	self._restorePosition = position
+	local move, fade = Animator.presets.ExpoInOut_0_35, Animator.presets.Expo_0_28
+
+	CollapsedFace.setShown(self, false, Animator.presets.Quint_0_15)
+	Animator.play(self.main, move, {Size = self.size, Position = position})
+	Animator.play(self.windowCorner, move, {CornerRadius = self.theme.CornerRoundness})
+
+	task.delay(0.22, function()
+		if self.hidden or self.unloaded then return end
+		self.topbar.Visible = true
+		self.elements.Visible = true
+		self.searchPill.Visible = true
+		self:_fadeSurfaces(true, fade)
+		self:_revealChrome(fade)
+		self:_fadeSearch(true, Animator.presets.Quint_0_4)
+		task.spawn(function() self:_revealAll(0.035) end)
+		bar.drag.Position = UDim2.new(position.X.Scale, position.X.Offset, position.Y.Scale, position.Y.Offset + self.size.Y.Offset / 2 + Styles.DragBar.gap)
+		bar.dragCosmetic.Size = UDim2.fromOffset(0, 4)
+		bar.dragCosmetic.BackgroundTransparency = 1
+		bar.drag.Visible = true
+		Animator.play(bar.dragCosmetic, Animator.presets.Expo_0_6, {BackgroundTransparency = 0.7, Size = UDim2.fromOffset(100, 4)})
+	end)
+	task.delay(0.6, function() self.animating = false end)
+end
+
+function W:ToggleHide()
+	if self.animating or self.unloaded then return end
+	if self.hidden then self:Show() else self:Hide() end
+end
+
+do
+	local dragging, moved, grab, startMouse = false, false, Vector2.zero, Vector2.zero
+	local threshold = Styles.Collapsed.dragThreshold
+
+	local function inset()
+		if window.screenGui.IgnoreGuiInset then return variables.guiService:GetGuiInset() end
+		return Vector2.zero
+	end
+	local function isPress(input)
+		local name = input.UserInputType.Name
+		return name == 'MouseButton1' or name == 'Touch'
+	end
+
+	renderer:Connect(window.collapsedInteract.InputBegan, function(input, processed)
+		if processed or not window.hidden or window.animating or not isPress(input) then return end
+		dragging, moved = true, false
+		startMouse = UIS:GetMouseLocation()
+		grab = window.main.AbsolutePosition + window.main.AbsoluteSize * window.main.AnchorPoint - startMouse
+	end)
+	renderer:Connect(UIS.InputEnded, function(input)
+		if not isPress(input) or not dragging then return end
+		dragging = false
+		if moved then
+			window._collapsedPosition = window.main.Position
+			return
+		end
+		Haptic.click()
+		window:ToggleHide()
+	end)
+	renderer:Connect(UIS.WindowFocusReleased, function() dragging = false end)
+	renderer:Connect(variables.runService.RenderStepped, function()
+		if not dragging then return end
+		if not window.hidden or window.animating then
+			dragging = false
+			return
+		end
+		local mouse = UIS:GetMouseLocation()
+		if not moved and (mouse - startMouse).Magnitude < threshold then return end
+		moved = true
+		local target = mouse + grab + inset()
+		window.main.Position = UDim2.fromOffset(target.X, target.Y)
+	end)
+end
+
+function W:Close()
+	if self.unloaded or self.closing then return end
+	self.closing = true
+	self.animating = true
+	local quick = Animator.presets.Quint_0_18
+	self:_fadeSurfaces(false, quick)
+	self:_fadeSearch(false, quick)
+	Animator.play(bar.dragCosmetic, quick, {Size = UDim2.fromOffset(0, 4), BackgroundTransparency = 1})
+	for _, el in page.elements do el:_setShown(false, true) end
+	if self.title then Animator.play(self.title, quick, {TextTransparency = 1}) end
+	if self.subtitle then Animator.play(self.subtitle, quick, {TextTransparency = 1}) end
+	if self.topbarIcon then Animator.play(self.topbarIcon, quick, {ImageTransparency = 1}) end
+	Animator.play(closeAction.iconLabel, quick, {ImageTransparency = 1})
+	Animator.play(minimiseAction.iconLabel, quick, {ImageTransparency = 1})
+	Animator.play(self.main, Animator.presets.ExpoInOut_0_35, {
+		Size = UDim2.fromOffset(self.main.Size.X.Offset, 0), BackgroundTransparency = 1,
+	})
+	task.wait(0.4)
+	self:Unload()
+end
+
+function W:Unload()
+	if self.unloaded then return end
+	self.unloaded = true
+	pcall(function() audio:Stop() end)
+	preview.video.Playing = false
+	stopTrack()
+	for _, object in spawned do pcall(function() object:Destroy() end) end
+	spawned = {}
+	Haptic.teardown()
+	Haptic.releaseContainer(self.screenGui)
+	for index = #renderer.connections, 1, -1 do
+		pcall(function() renderer.connections[index]:Disconnect() end)
+	end
+	for index = #renderer.instances, 1, -1 do
+		pcall(function() renderer.instances[index]:Destroy() end)
+	end
+	table.clear(renderer.connections)
+	table.clear(renderer.instances)
+	if registry.AssetViewerWindow == self then registry.AssetViewerWindow = nil end
+end
+
+registry.AssetViewerWindow = window
+task.spawn(function() window:Show() end)
+
+return window
