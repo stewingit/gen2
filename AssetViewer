@@ -1,9 +1,10 @@
 -- Roblox Asset Viewer
-
 local ENGINE_URL = 'https://raw.githubusercontent.com/stewingit/gen2/refs/heads/main/Engine'
-local THEME = 'default' -- 'default' | 'rose' | 'ember' | 'frost' | 'amethyst' | 'cobalt'
+local THEME = 'default'
 local FONT_ASSET = 'rbxassetid://12187365364'
 local SAVE_FOLDER = 'AssetViewer'
+local DOWNLOAD_FOLDER = SAVE_FOLDER .. '/Downloads'
+local LOAD_FOLDER = SAVE_FOLDER .. '/Loader'
 local SPAWN_LIFETIME = 15
 
 local registry = (getgenv and getgenv()) or shared
@@ -57,6 +58,7 @@ local Pill = requireNode(Prim.Pill)
 local Dialog = requireNode(Prim.Dialog)
 local Toast = requireNode(Prim.Toast)
 local Label = requireNode(Prim.Label)
+local NavItem = requireNode(Prim.NavItem)
 
 local Players = game:GetService('Players')
 local MarketplaceService = game:GetService('MarketplaceService')
@@ -123,14 +125,20 @@ local themeManager = ThemeManager.new({theme = THEME, label = 'Asset Viewer'})
 local renderer = Renderer.new({themeManager = themeManager})
 
 local layout = table.clone(layouts.top)
-layout.chromeHeight = layout.topbarHeight + 44 
+
+-- The tab strip sits under the title bar and the search pill moves down below it.
+local SEARCH_TOP = layout.tabStripTop + layout.tabStripHeight + 2
+local SEARCH_HEIGHT = Styles.Search.bar.height
+local NO_SEARCH_CHROME = layout.tabStripTop + layout.tabStripHeight + 8 -- chrome height on tabs without a search bar
+local CHROME_EXTRA = (SEARCH_TOP + SEARCH_HEIGHT + 9) - (layout.topbarHeight + 44)
+layout.chromeHeight = SEARCH_TOP + SEARCH_HEIGHT + 9
 
 local function fitSize()
 	local cam = workspace.CurrentCamera
 	local viewport = cam and cam.ViewportSize
 	local base = windowSizing.fit(viewport, 'top')
 	if not viewport or viewport.Y < 200 then return base end
-	local height = math.min(base.Y.Offset + 90, math.floor(viewport.Y * 0.92) - 20)
+	local height = math.min(base.Y.Offset + 90 + CHROME_EXTRA, math.floor(viewport.Y * 0.92) - 20)
 	return UDim2.fromOffset(base.X.Offset, math.max(height, base.Y.Offset))
 end
 local W = {}
@@ -162,6 +170,7 @@ function W:_interactive() return not self.animating and not self.hidden end
 
 WindowFrame.shell(renderer, window)
 WindowFrame.chrome(renderer, window)
+WindowFrame.tabStrip(renderer, window)
 WindowFrame.actionBar(renderer, window)
 
 local bar = {window = window}
@@ -213,8 +222,12 @@ function W:_fadeSurfaces(shown, info)
 	end
 end
 
-local page = {window = window, name = 'Asset Viewer', customOrder = 0, elements = {}}
+local page = {window = window, name = 'Viewer', icon = 'image', customOrder = 0, elements = {}}
+local loaderPage = {window = window, name = 'Loader', icon = 'folder-open', customOrder = 1, elements = {}}
+local tabs = {page, loaderPage}
+local tabStates = Styles.NavItem.states.top
 Page.build(renderer, page, window.elements)
+Page.build(renderer, loaderPage, window.elements)
 window.selectedTab = page
 
 SearchBar.build(renderer, window)
@@ -226,6 +239,7 @@ window.elementsLayout:JumpTo(page.tabPage)
 do
 	local SB = Styles.Search
 	window.searchPill.Visible = true
+	window.searchPill.Position = UDim2.new(0.5, 0, 0, SEARCH_TOP)
 	window.searchInput.PlaceholderText = 'Enter a Roblox asset ID'
 	window.searchInput.Size = UDim2.new(1, -90, 0, 18)
 	window.searchGo = Icon.create(renderer, {
@@ -237,14 +251,14 @@ do
 		Size = UDim2.fromOffset(40, 30), ZIndex = SB.bar.zIndex + 1, Parent = window.searchPill,
 	})
 	renderer:Connect(goButton.MouseButton1Click, function()
-		if window:_interactive() then task.spawn(function() window:Search() end) end
+		if window:_interactive() then task.spawn(function() window:Submit() end) end
 	end)
 	renderer:Connect(window.searchInput.Focused, function()
 		Animator.play(window.searchStroke, Animator.presets.Quint_0_25, {Transparency = 0.5})
 	end)
 	renderer:Connect(window.searchInput.FocusLost, function(enterPressed)
 		Animator.play(window.searchStroke, Animator.presets.Quint_0_25, {Transparency = SB.shown.stroke})
-		if enterPressed and window:_interactive() then task.spawn(function() window:Search() end) end
+		if enterPressed and window:_interactive() then task.spawn(function() window:Submit() end) end
 	end)
 end
 
@@ -662,7 +676,7 @@ local function setTag(typeName)
 		Pill.setColor(tag, color)
 		Pill.setText(tag, typeName)
 	end
-	Pill.setShown(tag, true, true)
+	Pill.setShown(tag, window.selectedTab == page, true)
 end
 
 local function setBusy(on, text)
@@ -986,9 +1000,13 @@ end
 
 local function ensureFolder()
 	pcall(function()
-		if isfolder and makefolder and not isfolder(SAVE_FOLDER) then makefolder(SAVE_FOLDER) end
+		if not (isfolder and makefolder) then return end
+		for _, folder in {SAVE_FOLDER, DOWNLOAD_FOLDER, LOAD_FOLDER} do
+			if not isfolder(folder) then makefolder(folder) end
+		end
 	end)
 end
+ensureFolder()
 
 local function downloadAsImage()
 	if not currentInfo then return end
@@ -1009,7 +1027,7 @@ local function downloadAsImage()
 		end
 		setBusy(false)
 		if thumbData and #thumbData > 100 then
-			local path = string.format('%s/%s_%s.png', SAVE_FOLDER, safeName(name), id)
+			local path = string.format('%s/%s_%s.png', DOWNLOAD_FOLDER, safeName(name), id)
 			local wrote = pcall(writefile, path, thumbData)
 			if wrote then
 				window:Toast({title = 'Saved to files', subtitle = path, icon = 'check'})
@@ -1044,7 +1062,7 @@ function W:Download()
 		local ok, res = pcall(function() return game:HttpGet('https://assetdelivery.roblox.com/v1/asset/?id=' .. id) end)
 		setBusy(false)
 		if ok and type(res) == 'string' and #res > 500 then
-			local path = string.format('%s/%s_%s%s', SAVE_FOLDER, safeName(name), id, ext)
+			local path = string.format('%s/%s_%s%s', DOWNLOAD_FOLDER, safeName(name), id, ext)
 			local wrote = pcall(writefile, path, res)
 			if wrote then
 				window:Toast({title = 'Saved to files', subtitle = path, icon = 'check'})
@@ -1065,6 +1083,774 @@ function W:Download()
 		})
 	end)
 end
+
+-- ============================================================================
+-- Loader tab: browse .rbxm / .rbxmx files and copy or download single items
+-- ============================================================================
+
+local PAGE_SIZE = 10
+
+local KIND_ICONS = {
+	script = 'file-code', audio = 'music', image = 'image', mesh = 'box', animation = 'person-standing',
+	video = 'film', folder = 'folder', instance = 'box', file = 'file-box',
+}
+
+local FORMAT_CHOICES = {
+	audio = {'.mp3', '.ogg', '.wav'},
+	image = {'.png', '.jpg'},
+	mesh = {'.mesh', '.bin'},
+	video = {'.mp4', '.webm'},
+	animation = {'.rbxm', '.rbxmx'},
+}
+
+local loaderLoading = false
+local fileTabs, openTabs, fileCounter = {}, {}, 0 -- open file tabs, keyed by file path / asset id
+local loaderBrowser
+local sourceCache = setmetatable({}, {__mode = 'k'})
+
+local function clip(text, limit)
+	text = tostring(text):gsub('%c', ' ')
+	local length = utf8.len(text)
+	if not length then return text:sub(1, limit) end
+	if length <= limit then return text end
+	return text:sub(1, utf8.offset(text, limit) - 1) .. '...'
+end
+
+local function sanitize(text)
+	text = tostring(text)
+	if not utf8.len(text) then text = text:gsub('[\128-\255]', '?') end
+	return text
+end
+
+local function nodeChildren(node)
+	if typeof(node) == 'Instance' then
+		local ok, kids = pcall(function() return node:GetChildren() end)
+		return if ok then kids else {}
+	end
+	return node.Children
+end
+
+local function propValue(node, prop)
+	local ok, value = pcall(function() return node[prop] end)
+	if ok and type(value) == 'string' and value ~= '' then return value end
+	return nil
+end
+
+local function parseAssetId(text)
+	if type(text) ~= 'string' then return nil end
+	local id = text:match('rbxassetid://(%d+)') or text:match('[?&]id=(%d+)') or text:match('^%s*(%d+)%s*$')
+		or text:match('roblox%.com/[%w%-]+/(%d+)')
+	return tonumber(id)
+end
+
+-- Returns kind, property that holds the asset reference
+local function classify(node)
+	if typeof(node) ~= 'Instance' then return 'file', nil end
+	if node:IsA('LuaSourceContainer') then return 'script', nil end
+	if node:IsA('Sound') then return 'audio', 'SoundId' end
+	if node:IsA('Decal') then return 'image', 'Texture' end
+	if node:IsA('ImageLabel') or node:IsA('ImageButton') then return 'image', 'Image' end
+	if node:IsA('Shirt') then return 'image', 'ShirtTemplate' end
+	if node:IsA('Pants') then return 'image', 'PantsTemplate' end
+	if node:IsA('ShirtGraphic') then return 'image', 'Graphic' end
+	if node:IsA('MeshPart') or node:IsA('FileMesh') then return 'mesh', 'MeshId' end
+	if node:IsA('Animation') then return 'animation', 'AnimationId' end
+	if node:IsA('VideoFrame') then return 'video', 'Video' end
+	if node:IsA('Folder') then return 'folder', nil end
+	return 'instance', nil
+end
+
+local function pathOf(node, rootName)
+	local parts, current, guard = {}, node, 0
+	while current and guard < 100 do
+		table.insert(parts, 1, current.Name)
+		current = current.Parent
+		guard += 1
+	end
+	return (if rootName then rootName .. '/' else '') .. table.concat(parts, '.')
+end
+
+local function firstChars(text, count)
+	text = tostring(text):gsub('%c', ' ')
+	local length = utf8.len(text)
+	if not length then return text:sub(1, count) end
+	if length <= count then return text end
+	return text:sub(1, utf8.offset(text, count + 1) - 1)
+end
+
+local function getSource(node)
+	if sourceCache[node] then return sourceCache[node] end
+	local source
+	local ok, value = pcall(function() return node.Source end)
+	if ok and type(value) == 'string' and value ~= '' then source = value end
+	if not source and type(decompile) == 'function' then
+		local decompiled, result = pcall(decompile, node)
+		if decompiled and type(result) == 'string' and result ~= '' then source = result end
+	end
+	if source then sourceCache[node] = source end
+	return source
+end
+
+local function sourcePreview(source)
+	local out, count, chars = {}, 0, 0
+	for line in (source .. '\n'):gmatch('(.-)\r?\n') do
+		count += 1
+		if count > 30 or chars > 1800 then break end
+		line = line:sub(1, 160)
+		table.insert(out, line)
+		chars += #line + 1
+	end
+	return sanitize(table.concat(out, '\n'))
+end
+
+local function sniff(data)
+	local head = data:sub(1, 16)
+	if head:sub(1, 8) == '\137PNG\r\n\26\n' then return '.png', 'PNG image' end
+	if head:sub(1, 3) == '\255\216\255' then return '.jpg', 'JPEG image' end
+	if head:sub(1, 4) == 'OggS' then return '.ogg', 'Ogg audio' end
+	if head:sub(1, 3) == 'ID3' or (head:byte(1) == 255 and (head:byte(2) or 0) >= 224) then return '.mp3', 'MP3 audio' end
+	if head:sub(1, 4) == 'RIFF' and head:sub(9, 12) == 'WEBP' then return '.webp', 'WebP image' end
+	if head:sub(1, 4) == 'RIFF' and head:sub(9, 12) == 'WAVE' then return '.wav', 'WAV audio' end
+	if head:sub(5, 8) == 'ftyp' then return '.mp4', 'MP4 video' end
+	if head:sub(1, 4) == '\26\69\223\163' then return '.webm', 'WebM video' end
+	if head:sub(1, 8) == '<roblox!' then return '.rbxm', 'Roblox binary model' end
+	if head:sub(1, 8) == '<roblox ' then return '.rbxmx', 'Roblox XML model' end
+	if head:sub(1, 8) == 'version ' then return '.mesh', 'Roblox mesh' end
+	return nil, nil
+end
+
+local function fetchAsset(id)
+	local ok, res = pcall(function() return game:HttpGet('https://assetdelivery.roblox.com/v1/asset/?id=' .. id) end)
+	if ok and type(res) == 'string' and #res > 100 and res:sub(1, 10) ~= '{"errors":' then return res end
+	return nil
+end
+
+local function fetchThumbnail(id)
+	local url = 'https://thumbnails.roblox.com/v1/assets?assetIds=' .. id .. '&returnPolicy=PlaceHolder&size=420x420&format=Png&isCircular=false'
+	local ok, response = pcall(function() return game:HttpGet(url) end)
+	if not ok or not response then return nil end
+	local decodeOk, decoded = pcall(function() return HttpService:JSONDecode(response) end)
+	local imageUrl = decodeOk and decoded and decoded.data and decoded.data[1] and decoded.data[1].imageUrl
+	if not imageUrl then return nil end
+	local imgOk, imgData = pcall(function() return game:HttpGet(imageUrl) end)
+	if imgOk and type(imgData) == 'string' and #imgData > 100 then return imgData end
+	return nil
+end
+
+local IMAGE_EXTS = {['.png'] = true, ['.jpg'] = true, ['.webp'] = true}
+
+local function fetchImage(id)
+	local data = fetchAsset(id)
+	if data then
+		if IMAGE_EXTS[sniff(data) or ''] then return data end
+		local inner = tonumber(data:match('rbxassetid://(%d+)') or data:match('[?&]id=(%d+)'))
+		if inner and inner ~= id then
+			local second = fetchAsset(inner)
+			if second and IMAGE_EXTS[sniff(second) or ''] then return second end
+		end
+	end
+	return fetchThumbnail(id)
+end
+
+local function listSavedFiles()
+	local available = type(listfiles) == 'function'
+	local files = {}
+	if available then
+		local ok, list = pcall(listfiles, LOAD_FOLDER)
+		if ok and type(list) == 'table' then
+			for _, path in list do
+				local normal = tostring(path):gsub('\\', '/')
+				local ext = normal:match('%.(%w+)$')
+				if ext and (ext:lower() == 'rbxm' or ext:lower() == 'rbxmx') then
+					table.insert(files, {path = normal, name = normal:match('([^/]+)$') or normal})
+				end
+			end
+		end
+		table.sort(files, function(x, y) return x.name:lower() < y.name:lower() end)
+	end
+	return files, available
+end
+
+-- ---------------------------------------------------------------- browser (one per tab)
+
+local browserRefresh, browserUp, browserOptions, browserRow, browserPage, closeFileTab
+
+local function browserBusy(b, on, text)
+	if on then
+		b.activity:SetTitle(text or 'Working...')
+		b.activity.main.Visible = true
+		b.activity:SetIndeterminate(true)
+	else
+		b.activity:SetIndeterminate(false)
+		b.activity.main.Visible = false
+	end
+end
+
+local function toast(title, subtitle, icon)
+	window:Toast({title = title, subtitle = subtitle, icon = icon or 'x'})
+end
+
+local function newBrowser(tab, mode)
+	local isFiles = mode == 'files'
+	local b = {tab = tab, mode = mode, entries = {}, pageIndex = 1, navStack = {}, node = nil, rows = {}}
+
+	local function buildNav()
+		b.navRow = Group_(tab)
+		if not isFiles then
+			b.upBtn = Button_(b.navRow, {name = 'Up', icon = 'arrow-up', callback = function() browserUp(b) end})
+			b.optionsBtn = Button_(b.navRow, {name = 'Options', icon = 'ellipsis', callback = function() browserOptions(b) end})
+			b.upBtn.main.Visible = false
+			b.optionsBtn.main.Visible = false
+		end
+		b.refreshBtn = Button_(b.navRow, {name = 'Refresh', icon = 'refresh-cw', callback = function() browserRefresh(b, false) end})
+		if not isFiles then
+			b.closeBtn = Button_(b.navRow, {name = 'Close', icon = 'x', callback = function() closeFileTab(tab) end})
+		end
+	end
+
+	if not isFiles then buildNav() end
+	b.activity = Progress_(tab, {name = 'Working...', showValue = false})
+	b.activity.main.Visible = false
+	b.info = Text_(tab, {
+		name = if isFiles then 'Loader' else esc(tab.fullName),
+		icon = if isFiles then 'folder-open' else 'file-box',
+		text = 'Loading...',
+	})
+	if isFiles then buildNav() end
+
+	for index = 1, PAGE_SIZE do
+		local row = Button_(tab, {name = ' ', icon = 'file', callback = function() browserRow(b, index) end})
+		row.main.Visible = false
+		row.main.ClipsDescendants = true
+		b.rows[index] = row
+	end
+
+	b.pagerRow = Group_(tab)
+	Button_(b.pagerRow, {name = 'Previous', icon = 'chevron-left', callback = function() browserPage(b, -1) end})
+	Button_(b.pagerRow, {name = 'Next', icon = 'chevron-right', callback = function() browserPage(b, 1) end})
+	b.pagerRow.main.Visible = false
+
+	tab.browser = b
+	return b
+end
+
+local function updateBrowserInfo(b, pages)
+	local pageLine = if pages > 1 then string.format('\n<b>Page</b>  %d / %d', b.pageIndex, pages) else ''
+	if b.mode == 'files' then
+		local _, available = listSavedFiles()
+		b.info:SetTitle('Loader files')
+		if not available then
+			b.info:Set('Your executor has no listfiles, so the files in the Loader folder cannot be listed.')
+		else
+			b.info:Set(string.format('<b>Folder</b>  %s\n<b>Files</b>  %d%s\nTap a file to open it in its own tab.',
+				esc(LOAD_FOLDER), #b.entries, pageLine))
+		end
+	else
+		local file = b.tab.file
+		b.info:SetTitle(esc(b.node.Name))
+		local pathLine = if b.node == file then esc(file.Path or file.Name) else esc(pathOf(b.node, file.Name))
+		b.info:Set(string.format('<b>Class</b>  %s\n<b>Items</b>  %d%s\n<b>Path</b>  %s',
+			esc(b.node.ClassName), #b.entries, pageLine, pathLine))
+	end
+end
+
+browserRefresh = function(b, scrollTop)
+	local entries = {}
+	if b.mode == 'files' then
+		for _, file in listSavedFiles() do
+			table.insert(entries, {kind = 'file', path = file.path, name = file.name})
+		end
+	else
+		for _, child in nodeChildren(b.node) do
+			table.insert(entries, {kind = 'node', node = child})
+		end
+	end
+	b.entries = entries
+
+	local pages = math.max(1, math.ceil(#entries / PAGE_SIZE))
+	b.pageIndex = math.clamp(b.pageIndex, 1, pages)
+
+	for index = 1, PAGE_SIZE do
+		local row = b.rows[index]
+		local entry = entries[(b.pageIndex - 1) * PAGE_SIZE + index]
+		if entry then
+			local label, icon
+			if entry.kind == 'file' then
+				label, icon = clip(entry.name, 40), KIND_ICONS.file
+			else
+				local node = entry.node
+				entry.kids = entry.kids or #nodeChildren(node)
+				label = clip(node.Name, 22) .. '  \u{2022}  ' .. clip(node.ClassName, 18)
+				if entry.kids > 0 then label ..= string.format('  (%d)', entry.kids) end
+				icon = KIND_ICONS[(classify(node))] or KIND_ICONS.instance
+			end
+			row:SetText(label)
+			row:SetIcon(icon)
+			row.main.Visible = true
+		else
+			row.main.Visible = false
+		end
+	end
+
+	if b.mode == 'nodes' then
+		local inTree = #b.navStack > 1
+		b.upBtn.main.Visible = inTree
+		b.optionsBtn.main.Visible = inTree
+		b.refreshBtn.main.Visible = not inTree
+		b.closeBtn.main.Visible = not inTree
+	end
+	b.pagerRow.main.Visible = pages > 1
+	updateBrowserInfo(b, pages)
+	if scrollTop and b.tab.tabPage then b.tab.tabPage.CanvasPosition = Vector2.zero end
+end
+
+browserPage = function(b, delta)
+	local pages = math.max(1, math.ceil(#b.entries / PAGE_SIZE))
+	local target = math.clamp(b.pageIndex + delta, 1, pages)
+	if target == b.pageIndex then return end
+	b.pageIndex = target
+	browserRefresh(b, true)
+end
+
+browserUp = function(b)
+	if #b.navStack <= 1 then return end
+	table.remove(b.navStack)
+	b.node = b.navStack[#b.navStack]
+	b.pageIndex = 1
+	browserRefresh(b, true)
+end
+
+browserOptions = function(b)
+	if typeof(b.node) == 'Instance' then window:NodeMenu(b.node, b) end
+end
+
+browserRow = function(b, index)
+	local entry = b.entries[(b.pageIndex - 1) * PAGE_SIZE + index]
+	if not entry then return end
+	if entry.kind == 'file' then
+		window:Load(entry.path)
+	elseif (entry.kids or 0) > 0 then
+		table.insert(b.navStack, entry.node)
+		b.node = entry.node
+		b.pageIndex = 1
+		browserRefresh(b, true)
+	else
+		window:NodeMenu(entry.node, b)
+	end
+end
+
+-- ---------------------------------------------------------------- Loader tab (saved files)
+
+loaderBrowser = newBrowser(loaderPage, 'files')
+loaderPage.browser = loaderBrowser
+
+Heading_(loaderPage, 'Notes', 'triangle-alert')
+Text_(loaderPage, {
+	name = '',
+	text = '\u{2022} Only .rbxm / .rbxmx files in the Loader folder are listed here\n'
+		.. '\u{2022} Place files in your executors workspace.AssetViewer.Loader\n'
+		.. '\u{2022} Opening a file gives it its own tab\n'
+		.. '\u{2022} Tap a folder to open it, tap an item for download and copy options\n'
+		.. '\u{2022} Loading needs getcustomasset and GetObjects; script source needs decompile\n'
+		.. '\u{2022} Saving a model or part as .rbxm uses your executor\'s saveinstance',
+})
+
+function W:ClearLoaded()
+	for _, tab in fileTabs do
+		if tab.file then
+			for _, object in tab.file.Children do pcall(function() object:Destroy() end) end
+		end
+	end
+	fileTabs, openTabs = {}, {}
+end
+
+local function loadFromFile(path)
+	local getAsset = getcustomasset or getsynasset
+	if not getAsset then return nil, 'Your executor has no getcustomasset' end
+	local ok, content = pcall(getAsset, path)
+	if not ok or not content then return nil, 'getcustomasset could not read that file' end
+	local loadedOk, objects = pcall(function() return game:GetObjects(content) end)
+	if not (loadedOk and type(objects) == 'table' and #objects > 0) then
+		local inserted, single = pcall(function() return game:GetService('InsertService'):LoadLocalAsset(content) end)
+		if inserted and typeof(single) == 'Instance' then
+			objects = {single}
+		else
+			return nil, 'GetObjects could not load that file'
+		end
+	end
+	return objects
+end
+
+local function wireTab(tab)
+	NavItem.build(renderer, tab, layout)
+	local hit = tab.topbarItemInteract
+	tab.connections = {
+		renderer:Connect(hit.MouseButton1Click, function()
+			if not window:_interactive() then return end
+			Haptic.click()
+			window:SelectTab(tab)
+		end),
+		renderer:Connect(hit.MouseEnter, function()
+			if not window:_interactive() or window.selectedTab == tab then return end
+			NavItem.applyVisual(tab, tabStates.hover, Styles.Page.tween.hover)
+			Page.spinGradients(tab)
+		end),
+		renderer:Connect(hit.MouseLeave, function()
+			if not window:_interactive() or window.selectedTab == tab then return end
+			NavItem.applyVisual(tab, tabStates.unselected, Styles.Page.tween.hover)
+		end),
+	}
+end
+
+local function openFileTab(key, label, objects, path)
+	fileCounter += 1
+	local shortName = firstChars((label:gsub('%.rbxmx?$', '')), 10)
+	local tab = {
+		window = window, name = shortName, fullName = label, icon = 'file-box', customOrder = 10 + fileCounter,
+		elements = {}, key = key,
+		file = {Name = label, ClassName = 'File', Children = objects, Path = path},
+	}
+	table.insert(tabs, tab)
+	Page.build(renderer, tab, window.elements)
+	wireTab(tab)
+	local b = newBrowser(tab, 'nodes')
+	b.navStack = {tab.file}
+	b.node = tab.file
+	browserRefresh(b, true)
+	openTabs[key] = tab
+	table.insert(fileTabs, tab)
+	if not window.hidden then
+		tab.topbarItem.Visible = true
+		NavItem.applyVisual(tab, tabStates.unselected, Styles.Page.tween.select)
+	end
+	window:SelectTab(tab)
+end
+
+closeFileTab = function(tab)
+	if tab.closing then return end
+	tab.closing = true
+	openTabs[tab.key] = nil
+	local index = table.find(fileTabs, tab)
+	if index then table.remove(fileTabs, index) end
+	if window.selectedTab == tab then window:SelectTab(loaderPage) end
+	task.delay(0.4, function()
+		if window.unloaded then return end
+		local at = table.find(tabs, tab)
+		if at then table.remove(tabs, at) end
+		for _, object in tab.file.Children do pcall(function() object:Destroy() end) end
+		for _, connection in tab.connections or {} do renderer:Disconnect(connection) end
+		renderer:DestroySubtree(tab.topbarItem)
+		renderer:DestroySubtree(tab.tabPage)
+		tab.tabPage = nil
+	end)
+end
+
+function W:Load(path)
+	if not path or path == '' then return end
+	local existing = openTabs[path]
+	if existing and existing.tabPage then
+		self:SelectTab(existing) -- already open: just go to it
+		return
+	end
+	if loaderLoading then return end
+	loaderLoading = true
+	browserBusy(loaderBrowser, true, 'Loading...')
+	task.spawn(function()
+		local ok, objects, err = pcall(loadFromFile, path)
+		loaderLoading = false
+		browserBusy(loaderBrowser, false)
+		if not ok then objects, err = nil, tostring(objects) end
+		if window.unloaded then
+			for _, object in objects or {} do pcall(function() object:Destroy() end) end
+			return
+		end
+		if not objects then
+			toast('Could not load', clip(err or 'Unknown error', 70))
+			return
+		end
+		local label = path:match('([^/\\]+)$') or path
+		openFileTab(path, label, objects, path)
+		toast('Loaded', string.format('%s (%d root items)', clip(label, 30), #objects), 'check')
+	end)
+end
+
+function W:Submit()
+	if self.selectedTab == page then self:Search() end
+end
+
+function W:Choose(o)
+	local options = {}
+	for index, choice in o.choices do
+		table.insert(options, {
+			text = choice,
+			style = if index == 1 then 'primary' else 'neutral',
+			callback = function() o.callback(choice) end,
+		})
+	end
+	table.insert(options, {text = 'Cancel'})
+	return self:Popup({title = o.title, subtitle = o.subtitle, content = o.content, icon = o.icon or 'download', options = options})
+end
+
+local function baseNameFor(node, suffix)
+	local name = (safeName(node.Name):gsub('%s+', '_'))
+	if #name > 40 then name = name:sub(1, 40) end
+	return name .. '_' .. tostring(suffix or node.ClassName)
+end
+
+local function saveData(node, suffix, ext, data)
+	ensureFolder()
+	local path = string.format('%s/%s%s', DOWNLOAD_FOLDER, baseNameFor(node, suffix), ext)
+	if pcall(writefile, path, data) then
+		toast('Saved to files', path, 'check')
+		return path
+	end
+	toast('Download failed', 'Could not write the file')
+	return nil
+end
+
+local function saveInstanceTo(node, path, binary)
+	if type(saveinstance) ~= 'function' then return false end
+	local options = {
+		Binary = binary, IsModel = true, FilePath = path, FileName = path, Object = node,
+		ExtraInstances = {node}, mode = 'optimized', SaveNonCreatable = false,
+	}
+	local attempts = {
+		function() return saveinstance(node, path, options) end,
+		function() return saveinstance(options) end,
+	}
+	for _, attempt in attempts do
+		pcall(attempt)
+		local ok, exists = pcall(isfile, path)
+		if ok and exists then return true end
+	end
+	return false
+end
+
+local function copyText(text, label)
+	local clip_ = setclipboard or toclipboard
+	if not clip_ then
+		toast('No clipboard support', 'Your executor lacks setclipboard')
+		return
+	end
+	if pcall(clip_, text) then
+		toast('Copied ' .. label, clip(text, 40), 'check')
+	else
+		toast('Copy failed', 'The clipboard rejected the text')
+	end
+end
+
+local function downloadScript(node, b)
+	browserBusy(b, true, 'Reading script...')
+	task.spawn(function()
+		local source = getSource(node)
+		browserBusy(b, false)
+		if not source then
+			toast('Could not read source', 'Your executor needs decompile or a readable Source')
+			return
+		end
+		window:Choose({
+			title = 'Save script as',
+			subtitle = node.Name,
+			content = string.format('%d characters. The file is saved exactly as shown in the preview. Pick a file type:', #source),
+			choices = {'.lua', '.txt', '.luau'},
+			callback = function(ext) saveData(node, node.ClassName, ext, source) end,
+		})
+	end)
+end
+
+local function downloadAsset(node, kind, prop, b)
+	local id = parseAssetId(propValue(node, prop))
+	if not id then
+		toast('No asset ID', prop .. ' is empty or points at a local file')
+		return
+	end
+	browserBusy(b, true, 'Downloading...')
+	task.spawn(function()
+		local data = if kind == 'image' then fetchImage(id) else fetchAsset(id)
+		browserBusy(b, false)
+		if not data then
+			toast('Download denied', 'That asset is private, protected or unavailable')
+			return
+		end
+		local detected, label = sniff(data)
+		local choices, seen = {}, {}
+		local function push(ext)
+			if ext and not seen[ext] and #choices < 3 then
+				seen[ext] = true
+				table.insert(choices, ext)
+			end
+		end
+		push(detected)
+		for _, ext in FORMAT_CHOICES[kind] do push(ext) end
+		window:Choose({
+			title = 'Save ' .. kind .. ' as',
+			subtitle = node.Name,
+			content = string.format('Detected: %s (%d KB). Choosing a different extension only renames the file, it does not convert it.',
+				label or 'unknown format', math.max(1, math.floor(#data / 1024))),
+			choices = choices,
+			callback = function(ext) saveData(node, id, ext, data) end,
+		})
+	end)
+end
+
+local function downloadInstance(node, b)
+	if type(saveinstance) ~= 'function' then
+		toast('No saveinstance support', 'Your executor cannot save models or parts')
+		return
+	end
+	window:Choose({
+		title = 'Save as',
+		subtitle = node.Name,
+		content = 'Saves this item and everything inside it using your executor\'s saveinstance.',
+		choices = {'.rbxm', '.rbxmx'},
+		callback = function(ext)
+			browserBusy(b, true, 'Saving...')
+			task.spawn(function()
+				ensureFolder()
+				local path = string.format('%s/%s%s', DOWNLOAD_FOLDER, baseNameFor(node, node.ClassName), ext)
+				local saved = saveInstanceTo(node, path, ext == '.rbxm')
+				browserBusy(b, false)
+				if saved then
+					toast('Saved to files', path, 'check')
+				else
+					toast('Save failed', 'saveinstance did not produce a file')
+				end
+			end)
+		end,
+	})
+end
+
+function W:DownloadNode(node, b)
+	if not writefile then
+		toast('No writefile support', 'Your executor cannot save files')
+		return
+	end
+	local kind, prop = classify(node)
+	if kind == 'script' then
+		downloadScript(node, b)
+	elseif prop and parseAssetId(propValue(node, prop)) then
+		downloadAsset(node, kind, prop, b)
+	else
+		downloadInstance(node, b)
+	end
+end
+
+function W:CopyNode(node, b)
+	local kind, prop = classify(node)
+	local rootName = b.tab.file.Name
+	local choices
+	if kind == 'script' then
+		choices = {'Source', 'Path'}
+	elseif prop and parseAssetId(propValue(node, prop)) then
+		choices = {'Asset ID', 'Path'}
+	else
+		choices = {'Name', 'Path'}
+	end
+	window:Choose({
+		title = 'Copy what?',
+		subtitle = node.Name,
+		choices = choices,
+		icon = 'copy',
+		callback = function(choice)
+			task.spawn(function()
+				if choice == 'Source' then
+					local source = getSource(node)
+					if source then copyText(source, 'source') else toast('Could not read source', 'Your executor needs decompile') end
+				elseif choice == 'Asset ID' then
+					copyText(tostring(parseAssetId(propValue(node, prop))), 'asset ID')
+				elseif choice == 'Name' then
+					copyText(node.Name, 'name')
+				else
+					copyText(pathOf(node, rootName), 'path')
+				end
+			end)
+		end,
+	})
+end
+
+function W:SpawnNode(node)
+	local cf = spawnCFrame()
+	if not cf then return end
+	local ok, clone = pcall(function() return node:Clone() end)
+	if not ok or not clone then
+		toast('Could not spawn', 'This item cannot be cloned')
+		return
+	end
+	pcall(function() clone:PivotTo(cf) end)
+	clone.Parent = workspace
+	track(clone)
+	toast('Spawned ' .. clip(node.Name, 24), nil, 'check')
+end
+
+function W:NodeMenu(node, b)
+	if typeof(node) ~= 'Instance' then return end
+	local kind, prop = classify(node)
+	local rootName = b.tab.file.Name
+	browserBusy(b, true, 'Reading...')
+	task.spawn(function()
+		local lines = {'Class: ' .. node.ClassName, 'Path: ' .. pathOf(node, rootName)}
+		local kids = #nodeChildren(node)
+		if kids > 0 then table.insert(lines, 'Children: ' .. kids) end
+		if prop then
+			local value = propValue(node, prop)
+			if value then table.insert(lines, prop .. ': ' .. value) end
+		end
+		if kind == 'script' then
+			local source = getSource(node)
+			if source then
+				local lineCount = select(2, source:gsub('\n', '\n')) + 1
+				table.insert(lines, string.format('Source: %d lines, %d characters', lineCount, #source))
+				table.insert(lines, '')
+				table.insert(lines, sourcePreview(source))
+			else
+				table.insert(lines, 'Source: not readable (your executor needs decompile)')
+			end
+		end
+		browserBusy(b, false)
+		if window.unloaded then return end
+
+		local options = {
+			{text = 'Download', style = 'primary', callback = function() window:DownloadNode(node, b) end},
+			{text = 'Copy', callback = function() window:CopyNode(node, b) end},
+		}
+		if node:IsA('PVInstance') then
+			table.insert(options, {text = 'Spawn', callback = function() window:SpawnNode(node) end})
+		end
+		table.insert(options, {text = 'Cancel'})
+		window:Popup({
+			title = clip(node.Name, 60),
+			subtitle = node.ClassName,
+			content = table.concat(lines, '\n'),
+			icon = KIND_ICONS[kind] or 'box',
+			options = options,
+		})
+	end)
+end
+
+function W:SelectTab(tab)
+	if self.unloaded or not tab or not tab.tabPage or tab == self.selectedTab then return end
+	local previous = self.selectedTab
+	if previous then previous.searchText = self.searchInput.Text end
+	self.selectedTab = tab
+	self.elementsLayout:JumpTo(tab.tabPage)
+	self.searchInput.PlaceholderText = tab.placeholder or ''
+	self.searchInput.Text = tab.searchText or ''
+	self.searchPill.Visible = tab == page and not self.hidden
+	self.elements.Size = UDim2.new(1, 0, 1, -(if tab == page then layout.chromeHeight else NO_SEARCH_CHROME))
+	for _, other in tabs do
+		NavItem.applyVisual(other, tabStates[if other == tab then 'selected' else 'unselected'], Styles.Page.tween.select)
+	end
+	Page.spinGradients(tab)
+	if tag then Pill.setShown(tag, tab == page, true) end
+	if tab == loaderPage then browserRefresh(loaderBrowser, false) end
+end
+
+page.placeholder = 'Enter a Roblox asset ID'
+
+for _, tab in tabs do wireTab(tab) end
+
+browserRefresh(loaderBrowser, false)
+
 
 do
 	local dragging, grab = false, Vector2.zero
@@ -1165,9 +1951,22 @@ do
 end
 
 function W:_revealAll(step)
-	for index, el in ipairs(page.elements) do
+	local selected = self.selectedTab or page
+	for _, tab in tabs do
+		if tab ~= selected then
+			for _, el in tab.elements do el:_setShown(true, false) end
+		end
+	end
+	for index, el in ipairs(selected.elements) do
 		el:_setShown(true, true)
 		if step and index <= 14 then task.wait(step) end
+	end
+end
+
+function W:_hideAll()
+	local selected = self.selectedTab or page
+	for _, tab in tabs do
+		for _, el in tab.elements do el:_setShown(false, tab == selected) end
 	end
 end
 
@@ -1196,7 +1995,12 @@ function W:_revealChrome(info)
 	if self.subtitle then Animator.play(self.subtitle, info, {TextTransparency = 0.7}) end
 	IconButton.fade(closeAction, 'rest')
 	IconButton.fade(minimiseAction, 'rest')
-	if tag then Pill.setShown(tag, true, true) end
+	if tag then Pill.setShown(tag, self.selectedTab == page, true) end
+	for _, tab in tabs do
+		tab.topbarItem.Visible = true
+		NavItem.applyVisual(tab, tabStates[if tab == self.selectedTab then 'selected' else 'unselected'], info)
+		Page.spinGradients(tab)
+	end
 end
 
 function W:Show()
@@ -1260,7 +2064,8 @@ function W:Hide()
 	Animator.play(closeAction.iconLabel, fast, {ImageTransparency = 1})
 	Animator.play(minimiseAction.iconLabel, fast, {ImageTransparency = 1})
 	if tag then Pill.setShown(tag, false, true) end
-	for _, el in page.elements do el:_setShown(false, true) end
+	for _, tab in tabs do NavItem.applyVisual(tab, tabStates.hidden, fast) end
+	self:_hideAll()
 
 	local tween = Animator.play(self.main, move, {Size = size, Position = position})
 	tween.Completed:Connect(function()
@@ -1273,6 +2078,7 @@ function W:Hide()
 		if not self.hidden or self.unloaded then return end
 		self.topbar.Visible = false
 		self.elements.Visible = false
+		self.tabList.Visible = false
 		self.searchPill.Visible = false
 		CollapsedFace.setShown(self, true, fade)
 	end)
@@ -1291,7 +2097,8 @@ function W:_restore()
 		if self.hidden or self.unloaded then return end
 		self.topbar.Visible = true
 		self.elements.Visible = true
-		self.searchPill.Visible = true
+		self.tabList.Visible = true
+		self.searchPill.Visible = self.selectedTab == page
 		self:_fadeSurfaces(true, fade)
 		self:_revealChrome(fade)
 		self:_fadeSearch(true, Animator.presets.Quint_0_4)
@@ -1362,7 +2169,8 @@ function W:Close()
 	self:_fadeSurfaces(false, quick)
 	self:_fadeSearch(false, quick)
 	Animator.play(bar.dragCosmetic, quick, {Size = UDim2.fromOffset(0, 4), BackgroundTransparency = 1})
-	for _, el in page.elements do el:_setShown(false, true) end
+	for _, tab in tabs do NavItem.applyVisual(tab, tabStates.hidden, quick) end
+	self:_hideAll()
 	if self.title then Animator.play(self.title, quick, {TextTransparency = 1}) end
 	if self.subtitle then Animator.play(self.subtitle, quick, {TextTransparency = 1}) end
 	if self.topbarIcon then Animator.play(self.topbarIcon, quick, {ImageTransparency = 1}) end
@@ -1383,6 +2191,7 @@ function W:Unload()
 	stopTrack()
 	for _, object in spawned do pcall(function() object:Destroy() end) end
 	spawned = {}
+	if self.ClearLoaded then self:ClearLoaded() end
 	Haptic.teardown()
 	Haptic.releaseContainer(self.screenGui)
 	for index = #renderer.connections, 1, -1 do
